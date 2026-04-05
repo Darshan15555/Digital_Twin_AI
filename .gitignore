@@ -1,0 +1,7 @@
+data/
+models/*.pkl
+__pycache__/
+*.pyc
+*.log
+demo_data/
+.env
