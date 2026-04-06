@@ -1,196 +1,290 @@
 """
-ml_model.py
-ICU mortality prediction model.
-Uses Random Forest for good performance without deep learning.
-Model is trained once and saved — reloaded on subsequent runs.
+Mortality, LOS, and sepsis model utilities.
 """
 
-import pandas as pd
-import numpy as np
-import pickle
-import logging
-from pathlib import Path
-import sys
+from __future__ import annotations
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from config.config import MORTALITY_MODEL_PATH, SCALER_PATH, FEATURES_PATH
+import json
+import logging
+import pickle
+
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    average_precision_score,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
+
+from config.config import (
+    EARLY_MORTALITY_THRESHOLD,
+    FEATURE_NAMES_PATH,
+    LOS_MODEL_PATH,
+    MODEL_METRICS_PATH,
+    MORTALITY_BASELINE_MODEL_PATH,
+    MORTALITY_MODEL_PATH,
+    MORTALITY_SCALER_PATH,
+    MORTALITY_XGB_MODEL_PATH,
+    POSTGRES_EARLY_FEATURE_NAMES_PATH,
+    POSTGRES_EARLY_IMPUTER_PATH,
+    POSTGRES_EARLY_MODEL_PATH,
+)
 
 log = logging.getLogger(__name__)
 
-FEATURE_COLS = [
-    "age", "admissionheight", "admissionweight",
-    "apachescore", "predictedhospitalmortality",
-    "hr_mean", "hr_std", "sao2_mean", "sao2_min",
-    "resp_mean", "sbp_mean", "dbp_mean", "temp_mean",
-    "gender_enc", "unittype_enc"
+MODEL_FEATURES = [
+    "age",
+    "gender_enc",
+    "admissionweight",
+    "icu_los_hours",
+    "apachescore",
+    "predictedhospitalmortality",
+    "heartrate_mean",
+    "heartrate_max",
+    "heartrate_min",
+    "heartrate_std",
+    "sao2_mean",
+    "sao2_min",
+    "resp_mean",
+    "resp_max",
+    "sbp_mean",
+    "sbp_min",
+    "temp_mean",
+    "temp_max",
+    "cvp_mean",
+    "nibp_systolic_mean",
+    "nibp_mean_mean",
+    "creatinine_max",
+    "glucose_max",
+    "glucose_min",
+    "lactate_max",
+    "hemoglobin_min",
+    "wbc_max",
+    "potassium_min",
+    "potassium_max",
+    "bicarbonate_min",
+    "bun_max",
+    "gcs_min",
+    "on_vasopressor",
+    "vasopressor_duration_hours",
+    "fluid_balance_24h",
+    "urine_output_per_hour",
+    "on_ventilator",
+    "peep_mean",
+    "fio2_mean",
+    "has_diabetes",
+    "has_chf",
+    "has_copd",
+    "has_ckd",
+    "has_hypertension",
+    "has_immunosuppression",
+    "qsofa_score",
+    "sofa_approx_score",
 ]
-
-TARGET_COL = "hospital_mortality"
-
-
-def encode_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["gender_enc"] = (df["gender"].str.lower() == "male").astype(float)
-    unit_map = {v: i for i, v in enumerate(df["unittype"].fillna("unknown").unique())}
-    df["unittype_enc"] = df["unittype"].fillna("unknown").map(unit_map).fillna(0)
-    return df
-
-
-def prepare_X_y(df: pd.DataFrame):
-    df = encode_features(df)
-    available = [c for c in FEATURE_COLS if c in df.columns]
-    X = df[available].copy()
-    X = X.fillna(X.median(numeric_only=True))
-    y = df[TARGET_COL].fillna(0).astype(int) if TARGET_COL in df.columns else None
-    return X, y, available
-
-
-def train_model(ml_df: pd.DataFrame):
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import roc_auc_score, classification_report
-
-    log.info("Training mortality prediction model...")
-
-    df = ml_df.dropna(subset=[TARGET_COL])
-    X, y, feature_names = prepare_X_y(df)
-
-    log.info(f"Dataset: {X.shape}, positive rate: {y.mean():.3f}")
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s = scaler.transform(X_test)
-
-    # Random Forest (no need to scale, but we keep scaler for LR)
-    rf = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=8,
-        min_samples_leaf=10,
-        n_jobs=-1,
-        random_state=42,
-        class_weight="balanced"
-    )
-    rf.fit(X_train, y_train)
-
-    y_pred_proba = rf.predict_proba(X_test)[:, 1]
-    y_pred = rf.predict(X_test)
-    auc = roc_auc_score(y_test, y_pred_proba)
-    log.info(f"Random Forest AUC: {auc:.4f}")
-    log.info("\n" + classification_report(y_test, y_pred))
-
-    # Save model + scaler + feature list
-    with open(MORTALITY_MODEL_PATH, "wb") as f:
-        pickle.dump(rf, f)
-    with open(SCALER_PATH, "wb") as f:
-        pickle.dump(scaler, f)
-    with open(FEATURES_PATH, "wb") as f:
-        pickle.dump(feature_names, f)
-
-    log.info(f"Model saved → {MORTALITY_MODEL_PATH}")
-    return rf, scaler, feature_names, auc
-
-
-def load_model():
-    with open(MORTALITY_MODEL_PATH, "rb") as f:
-        model = pickle.load(f)
-    with open(SCALER_PATH, "rb") as f:
-        scaler = pickle.load(f)
-    with open(FEATURES_PATH, "rb") as f:
-        feature_names = pickle.load(f)
-    return model, scaler, feature_names
 
 
 def model_is_trained() -> bool:
-    return MORTALITY_MODEL_PATH.exists() and FEATURES_PATH.exists()
+    return (
+        MORTALITY_MODEL_PATH.exists()
+        and MORTALITY_SCALER_PATH.exists()
+        and FEATURE_NAMES_PATH.exists()
+        and LOS_MODEL_PATH.exists()
+    )
 
 
-def predict_patient(patient_row: dict) -> dict:
-    """Predict mortality risk for a single patient dict."""
-    model, scaler, feature_names = load_model()
+def _prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, SimpleImputer, list[str]]:
+    available = [col for col in MODEL_FEATURES if col in df.columns]
+    X = df[available].copy()
+    imputer = SimpleImputer(strategy="median")
+    X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=available, index=X.index)
+    return X_imputed, imputer, available
 
-    row_df = pd.DataFrame([patient_row])
-    row_df = encode_features(row_df)
 
-    # Fill missing features with 0
-    for col in feature_names:
-        if col not in row_df.columns:
-            row_df[col] = 0.0
+def train_models(df: pd.DataFrame) -> dict:
+    df = df.copy()
+    df = df.dropna(subset=["hospital_mortality", "icu_los_hours"])
 
-    X = row_df[feature_names].fillna(0)
+    X, imputer, feature_names = _prepare_features(df)
+    y_cls = df["hospital_mortality"].astype(int)
+    y_los = df["icu_los_hours"].astype(float)
 
-    risk_score = float(model.predict_proba(X)[0][1])
-    prediction = int(model.predict(X)[0])
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y_cls, test_size=0.2, random_state=42, stratify=y_cls
+    )
 
-    if risk_score >= 0.7:
-        risk_label = "HIGH"
-    elif risk_score >= 0.4:
-        risk_label = "MODERATE"
-    else:
-        risk_label = "LOW"
+    rf = RandomForestClassifier(
+        n_estimators=200,
+        max_depth=10,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    )
+    rf.fit(X_train, y_train)
+    rf_proba = rf.predict_proba(X_test)[:, 1]
+    rf_pred = (rf_proba >= 0.5).astype(int)
 
-    # Feature importances
-    importances = dict(zip(feature_names, model.feature_importances_))
-    top_features = sorted(importances.items(), key=lambda x: -x[1])[:5]
+    baseline = LogisticRegression(max_iter=1000, class_weight="balanced")
+    baseline.fit(X_train, y_train)
 
+    xgb_model = None
+    try:
+        from xgboost import XGBClassifier
+
+        xgb_model = XGBClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            eval_metric="logloss",
+            random_state=42,
+        )
+        xgb_model.fit(X_train, y_train)
+    except Exception as exc:
+        log.warning("XGBoost unavailable: %s", exc)
+
+    X_los_train, X_los_test, y_los_train, y_los_test = train_test_split(
+        X, y_los, test_size=0.2, random_state=42
+    )
+    los_model = RandomForestRegressor(
+        n_estimators=200,
+        max_depth=10,
+        random_state=42,
+        n_jobs=-1,
+    )
+    los_model.fit(X_los_train, y_los_train)
+    los_pred = los_model.predict(X_los_test)
+
+    metrics = {
+        "mortality_rf": {
+            "auc_roc": float(roc_auc_score(y_test, rf_proba)),
+            "auprc": float(average_precision_score(y_test, rf_proba)),
+            "f1": float(f1_score(y_test, rf_pred)),
+            "recall": float(recall_score(y_test, rf_pred)),
+        },
+        "los_rf": {
+            "mae": float(mean_absolute_error(y_los_test, los_pred)),
+            "rmse": float(np.sqrt(mean_squared_error(y_los_test, los_pred))),
+        },
+    }
+
+    with open(MORTALITY_MODEL_PATH, "wb") as handle:
+        pickle.dump(rf, handle)
+    with open(MORTALITY_BASELINE_MODEL_PATH, "wb") as handle:
+        pickle.dump(baseline, handle)
+    if xgb_model is not None:
+        with open(MORTALITY_XGB_MODEL_PATH, "wb") as handle:
+            pickle.dump(xgb_model, handle)
+    with open(MORTALITY_SCALER_PATH, "wb") as handle:
+        pickle.dump(imputer, handle)
+    with open(LOS_MODEL_PATH, "wb") as handle:
+        pickle.dump(los_model, handle)
+    with open(FEATURE_NAMES_PATH, "wb") as handle:
+        pickle.dump(feature_names, handle)
+    MODEL_METRICS_PATH.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+    return metrics
+
+
+def _load_pickle(path):
+    with open(path, "rb") as handle:
+        return pickle.load(handle)
+
+
+def load_models():
+    rf = _load_pickle(MORTALITY_MODEL_PATH)
+    imputer = _load_pickle(MORTALITY_SCALER_PATH)
+    los = _load_pickle(LOS_MODEL_PATH)
+    features = _load_pickle(FEATURE_NAMES_PATH)
+    return rf, imputer, los, features
+
+
+def _prepare_row(row: dict, imputer: SimpleImputer, feature_names: list[str]) -> pd.DataFrame:
+    df = pd.DataFrame([row])
+    for column in feature_names:
+        if column not in df.columns:
+            df[column] = np.nan
+    transformed = pd.DataFrame(imputer.transform(df[feature_names]), columns=feature_names)
+    return transformed
+
+
+def predict_mortality(row: dict) -> dict:
+    rf, imputer, _, features = load_models()
+    X = _prepare_row(row, imputer, features)
+    score = float(rf.predict_proba(X)[0, 1])
+    pred = int(score >= 0.5)
+    importances = sorted(zip(features, rf.feature_importances_), key=lambda item: item[1], reverse=True)[:5]
     return {
-        "risk_score": round(risk_score, 4),
-        "risk_label": risk_label,
-        "prediction": prediction,
-        "top_features": top_features
+        "risk_score": round(score, 4),
+        "prediction": pred,
+        "risk_label": "HIGH" if score >= 0.7 else "MODERATE" if score >= 0.4 else "LOW",
+        "top_features": [(name, round(float(value), 4)) for name, value in importances],
     }
 
 
-def digital_twin_forecast(vitals_df: pd.DataFrame, steps: int = 6) -> dict:
-    """
-    Simple digital twin: forecast next N vital readings using rolling average.
-    Returns predicted values for each vital column.
-    """
-    vital_cols = ["heartrate", "respiration", "sao2", "systemicsystolic", "temperature"]
-    result = {}
-
-    for col in vital_cols:
-        series = vitals_df[col].dropna()
-        if len(series) < 3:
-            result[col] = []
-            continue
-
-        # Use exponentially weighted moving average for forecast
-        ewm_val = series.ewm(span=5).mean().iloc[-1]
-        std_val = series.tail(10).std()
-        if pd.isna(std_val):
-            std_val = 0
-
-        # Simple forecast: mean ± slight trend
-        last_vals = series.tail(5).values
-        trend = (last_vals[-1] - last_vals[0]) / max(len(last_vals) - 1, 1)
-
-        forecast = []
-        current = ewm_val
-        for i in range(1, steps + 1):
-            noise = np.random.normal(0, std_val * 0.2)
-            predicted = current + (trend * 0.3) + noise
-            forecast.append(round(float(predicted), 2))
-            current = predicted
-
-        result[col] = forecast
-
-    return result
+def early_model_is_trained() -> bool:
+    return (
+        POSTGRES_EARLY_MODEL_PATH.exists()
+        and POSTGRES_EARLY_IMPUTER_PATH.exists()
+        and POSTGRES_EARLY_FEATURE_NAMES_PATH.exists()
+    )
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    # Quick test with dummy data
-    if model_is_trained():
-        result = predict_patient({
-            "age": 65, "apachescore": 50, "hr_mean": 90,
-            "sao2_mean": 94, "sbp_mean": 110, "gender": "Male"
-        })
-        print("Prediction:", result)
-    else:
-        print("Model not yet trained. Run setup.py first.")
+def load_early_mortality_model():
+    model = _load_pickle(POSTGRES_EARLY_MODEL_PATH)
+    imputer = _load_pickle(POSTGRES_EARLY_IMPUTER_PATH)
+    features = _load_pickle(POSTGRES_EARLY_FEATURE_NAMES_PATH)
+    return model, imputer, features
+
+
+def predict_early_mortality(row: dict, threshold: float | None = None) -> dict:
+    model, imputer, features = load_early_mortality_model()
+    active_threshold = EARLY_MORTALITY_THRESHOLD if threshold is None else threshold
+    X = _prepare_row(row, imputer, features)
+    score = float(model.predict_proba(X)[0, 1])
+    pred = int(score >= active_threshold)
+    importances = sorted(zip(features, model.feature_importances_), key=lambda item: item[1], reverse=True)[:5]
+    return {
+        "risk_score": round(score, 4),
+        "prediction": pred,
+        "threshold": round(float(active_threshold), 2),
+        "risk_label": "HIGH" if score >= 0.7 else "MODERATE" if score >= active_threshold else "LOW",
+        "top_features": [(name, round(float(value), 4)) for name, value in importances],
+        "model_variant": "early_random_forest",
+    }
+
+
+def predict_los(row: dict) -> dict:
+    _, imputer, los_model, features = load_models()
+    X = _prepare_row(row, imputer, features)
+    hours = float(los_model.predict(X)[0])
+    return {
+        "predicted_icu_los_hours": round(hours, 2),
+        "predicted_icu_los_days": round(hours / 24.0, 2),
+    }
+
+
+def predict_sepsis(row: dict) -> dict:
+    resp = float(row.get("resp_mean") or 0)
+    sbp = float(row.get("sbp_min") or row.get("sbp_mean") or 999)
+    gcs = float(row.get("gcs_min") or 15)
+    lactate = float(row.get("lactate_max") or 0)
+    creatinine = float(row.get("creatinine_max") or 0)
+    sao2 = float(row.get("sao2_min") or 100)
+
+    qsofa = int(resp >= 22) + int(sbp <= 100) + int(gcs < 15)
+    sofa_approx = qsofa + int(lactate > 2) + int(creatinine > 2) + int(sao2 < 92)
+    sepsis_risk = int(qsofa >= 2 or sofa_approx >= 4)
+    return {
+        "qsofa_score": qsofa,
+        "sofa_approx_score": sofa_approx,
+        "sepsis_risk": sepsis_risk,
+        "interpretation": "High sepsis risk" if sepsis_risk else "Lower sepsis risk",
+    }

@@ -1,38 +1,48 @@
 """
-api.py
-FastAPI backend for ICU Analytics System.
-Provides REST endpoints for the Streamlit dashboard.
+FastAPI backend for the local ICU analytics system.
 """
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-import pandas as pd
-import numpy as np
-import uvicorn
+from __future__ import annotations
+
 import logging
 import sys
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from utils.db_manager import (
-    get_patient_list, get_patient_by_id,
-    get_vitals_by_patient, get_labs_by_patient,
-    get_diagnosis_by_patient, get_treatments_by_patient,
-    get_stats, count_patients, update_ml_scores
+import pandas as pd
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from config.config import API_HOST, API_PORT, DATABASE_URL
+from models.digital_twin import ALERT_THRESHOLDS, deterioration_score, forecast_vitals, simulate_what_if
+from models.ml_model import (
+    early_model_is_trained,
+    model_is_trained,
+    predict_early_mortality,
+    predict_los,
+    predict_mortality,
+    predict_sepsis,
 )
-from models.ml_model import predict_patient, digital_twin_forecast, model_is_trained
-from config.config import API_HOST, API_PORT
+from utils.db_manager import (
+    analytics_query,
+    get_patient,
+    get_patient_table,
+    get_patients_filtered,
+    get_stats,
+    update_prediction_fields,
+)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
+pg_engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True) if DATABASE_URL.startswith("postgresql") else None
 
-app = FastAPI(
-    title="ICU Analytics API",
-    description="Local ICU analytics system powered by eICU dataset",
-    version="1.0.0"
-)
-
+app = FastAPI(title="ICU Analytics API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,207 +51,281 @@ app.add_middleware(
 )
 
 
-def df_to_json(df: pd.DataFrame) -> list:
-    import math
-    """Convert dataframe to JSON-safe list of dicts."""
-    records = df.where(pd.notnull(df), None).to_dict(orient="records")
-    cleaned = []
-    for row in records:
-        clean_row = {k: (None if isinstance(v, float) and (math.isnan(v) or math.isinf(v)) else v) for k, v in row.items()}
-        cleaned.append(clean_row)
-    return cleaned
+def to_json(df: pd.DataFrame) -> list[dict]:
+    if df.empty:
+        return []
+    return df.where(pd.notnull(df), None).to_dict(orient="records")
+
+
+def load_patient_row(patient_id: int) -> dict:
+    patient_df = get_patient(patient_id)
+    if patient_df.empty:
+        raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found")
+    return patient_df.iloc[0].to_dict()
+
+
+def load_postgres_patient_row(patient_id: int) -> dict:
+    if pg_engine is None:
+        raise HTTPException(status_code=503, detail="PostgreSQL database is not configured for early mortality predictions.")
+
+    query = """
+        SELECT *
+        FROM ml_prep.ml_dataset
+        WHERE patientunitstayid = %(patient_id)s
+    """
+    patient_df = pd.read_sql(query, pg_engine, params={"patient_id": patient_id})
+    if patient_df.empty:
+        raise HTTPException(status_code=404, detail=f"Patient {patient_id} not found in ml_prep.ml_dataset")
+    return patient_df.iloc[0].to_dict()
 
 
 @app.get("/")
 def root():
-    return {"status": "ok", "system": "ICU Analytics API", "version": "1.0.0"}
+    return {"status": "ok", "system": "ICU Analytics API"}
 
 
 @app.get("/stats")
-def system_stats():
-    """Overall ICU statistics."""
-    try:
-        stats = get_stats()
-        return {
-            "total_patients": int(stats["total_patients"]),
-            "mortality_rate": round(float(stats["mortality_rate"] or 0) * 100, 2),
-            "avg_age": round(float(stats["avg_age"] or 0), 1),
-            "avg_apache_score": round(float(stats["avg_apache"] or 0), 1),
-            "model_ready": model_is_trained()
-        }
-    except Exception as e:
-        log.error(f"Stats error: {e}")
-        raise HTTPException(500, str(e))
+def stats():
+    payload = get_stats()
+    payload["model_ready"] = model_is_trained()
+    return payload
 
 
 @app.get("/patients")
 def list_patients(
-    limit: int = Query(100, le=500),
-    offset: int = 0,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     search: Optional[str] = None,
-    high_risk_only: bool = False
+    unit: Optional[str] = None,
+    high_risk_only: bool = False,
+    age_min: Optional[int] = None,
+    age_max: Optional[int] = None,
+    on_vasopressor: Optional[bool] = None,
+    on_ventilator: Optional[bool] = None,
 ):
-    """Get list of patients with optional filters."""
-    try:
-        from utils.db_manager import get_conn
-        import sqlite3
-        conn = get_conn()
-
-        query = "SELECT * FROM patients WHERE 1=1"
-        params = []
-
-        if search:
-            try:
-                pid = int(search)
-                query += " AND patientunitstayid = ?"
-                params.append(pid)
-            except ValueError:
-                query += " AND (unittype LIKE ? OR gender LIKE ?)"
-                params.extend([f"%{search}%", f"%{search}%"])
-
-        if high_risk_only:
-            query += " AND (ml_risk_score >= 0.5 OR apachescore >= 60)"
-
-        query += f" LIMIT {limit} OFFSET {offset}"
-        df = pd.read_sql(query, conn, params=params)
-        conn.close()
-        return {"patients": df_to_json(df), "total": len(df)}
-    except Exception as e:
-        log.error(f"Patient list error: {e}")
-        raise HTTPException(500, str(e))
+    df = get_patients_filtered(
+        limit=limit,
+        offset=offset,
+        search=search,
+        unit=unit,
+        risk_only=high_risk_only,
+        age_min=age_min,
+        age_max=age_max,
+        on_vasopressor=on_vasopressor,
+        on_ventilator=on_ventilator,
+    )
+    return {"patients": to_json(df), "count": len(df)}
 
 
 @app.get("/patients/{patient_id}")
-def get_patient(patient_id: int):
-    """Get detailed info for a single patient."""
-    df = get_patient_by_id(patient_id)
-    if df.empty:
-        raise HTTPException(404, f"Patient {patient_id} not found")
-    return df_to_json(df)[0]
+def patient_record(patient_id: int):
+    return load_patient_row(patient_id)
 
 
 @app.get("/patients/{patient_id}/vitals")
-def patient_vitals(patient_id: int, max_points: int = 200):
-    """Get vitals time-series for a patient."""
-    df = get_vitals_by_patient(patient_id)
-    if df.empty:
-        return {"vitals": [], "count": 0}
-
-    # Downsample if too many points
-    if len(df) > max_points:
-        step = len(df) // max_points
-        df = df.iloc[::step]
-
-    return {"vitals": df_to_json(df), "count": len(df)}
+def patient_vitals(patient_id: int):
+    periodic = get_patient_table("vitals_periodic", patient_id, "observationoffset")
+    aperiodic = get_patient_table("vitals_aperiodic", patient_id, "observationoffset")
+    return {
+        "periodic": to_json(periodic),
+        "aperiodic": to_json(aperiodic),
+    }
 
 
 @app.get("/patients/{patient_id}/labs")
 def patient_labs(patient_id: int):
-    """Get lab results for a patient."""
-    df = get_labs_by_patient(patient_id)
-    return {"labs": df_to_json(df), "count": len(df)}
+    return {"labs": to_json(get_patient_table("labs", patient_id, "labresultoffset"))}
 
 
 @app.get("/patients/{patient_id}/diagnosis")
 def patient_diagnosis(patient_id: int):
-    """Get diagnoses for a patient."""
-    df = get_diagnosis_by_patient(patient_id)
-    return {"diagnosis": df_to_json(df)}
+    return {"diagnosis": to_json(get_patient_table("diagnosis", patient_id, "diagnosisoffset"))}
 
 
 @app.get("/patients/{patient_id}/treatments")
 def patient_treatments(patient_id: int):
-    """Get treatments for a patient."""
-    df = get_treatments_by_patient(patient_id)
-    return {"treatments": df_to_json(df)}
+    return {"treatments": to_json(get_patient_table("treatments", patient_id, "treatmentoffset"))}
 
 
-@app.get("/patients/{patient_id}/predict")
-def predict_outcome(patient_id: int):
-    """Predict ICU mortality risk for a patient."""
+@app.get("/patients/{patient_id}/medications")
+def patient_medications(patient_id: int):
+    meds = get_patient_table("medications", patient_id, "drugstartoffset")
+    infusions = get_patient_table("infusions", patient_id, "infusionoffset")
+    return {"medications": to_json(meds), "infusions": to_json(infusions)}
+
+
+@app.get("/patients/{patient_id}/fluid-balance")
+def patient_fluid_balance(patient_id: int):
+    summary = get_patient_table("intake_output_summary", patient_id)
+    raw = get_patient_table("intake_output_summary", patient_id)
+    return {"summary": to_json(summary), "timeline": to_json(raw)}
+
+
+@app.get("/patients/{patient_id}/ventilation")
+def patient_ventilation(patient_id: int):
+    return {"ventilation": to_json(get_patient_table("respiratory_care", patient_id, "respcarestatusoffset"))}
+
+
+@app.get("/patients/{patient_id}/comorbidities")
+def patient_comorbidities(patient_id: int):
+    return {"comorbidities": to_json(get_patient_table("comorbidities", patient_id))}
+
+
+@app.get("/patients/{patient_id}/predict/mortality")
+def patient_predict_mortality(patient_id: int):
     if not model_is_trained():
-        raise HTTPException(503, "ML model not trained yet. Run setup.py first.")
+        raise HTTPException(status_code=503, detail="Models not trained. Run setup.py first.")
+    row = load_patient_row(patient_id)
+    result = predict_mortality(row)
+    update_prediction_fields(
+        patient_id,
+        {
+            "predicted_mortality_risk": result["risk_score"],
+            "predicted_mortality_label": result["risk_label"],
+        },
+    )
+    return result
 
-    patient_df = get_patient_by_id(patient_id)
-    if patient_df.empty:
-        raise HTTPException(404, f"Patient {patient_id} not found")
 
-    patient_dict = patient_df.iloc[0].to_dict()
-    result = predict_patient(patient_dict)
+@app.get("/patients/{patient_id}/predict/early-mortality")
+def patient_predict_early_mortality(patient_id: int):
+    if not early_model_is_trained():
+        raise HTTPException(status_code=503, detail="Early mortality model not trained. Run train_postgres_model.py first.")
+    row = load_postgres_patient_row(patient_id)
+    result = predict_early_mortality(row)
+    return result
 
-    # Cache prediction in DB
-    update_ml_scores(patient_id, result["risk_score"], result["prediction"])
 
-    return {
-        "patient_id": patient_id,
-        **result
-    }
+@app.get("/patients/{patient_id}/predict/los")
+def patient_predict_los(patient_id: int):
+    if not model_is_trained():
+        raise HTTPException(status_code=503, detail="Models not trained. Run setup.py first.")
+    row = load_patient_row(patient_id)
+    return predict_los(row)
+
+
+@app.get("/patients/{patient_id}/predict/sepsis")
+def patient_predict_sepsis(patient_id: int):
+    row = load_patient_row(patient_id)
+    return predict_sepsis(row)
 
 
 @app.get("/patients/{patient_id}/digital-twin")
-def digital_twin(patient_id: int, steps: int = 6):
-    """Generate digital twin forecast for patient vitals."""
-    vitals_df = get_vitals_by_patient(patient_id)
-    if vitals_df.empty:
-        raise HTTPException(404, "No vitals data available for this patient")
+def patient_digital_twin(
+    patient_id: int,
+    steps: int = Query(6, ge=3, le=12),
+    fio2_delta: float = 0.0,
+    vasopressor_delta: float = 0.0,
+):
+    row = load_patient_row(patient_id)
+    periodic = get_patient_table("vitals_periodic", patient_id, "observationoffset")
+    labs = get_patient_table("labs", patient_id, "labresultoffset")
+    nurse = get_patient_table("nurse_charting", patient_id, "nursingchartoffset")
+    if periodic.empty:
+        raise HTTPException(status_code=404, detail="No periodic vitals found")
 
-    forecast = digital_twin_forecast(vitals_df, steps=steps)
-    last_offset = vitals_df["observationoffset"].max() if "observationoffset" in vitals_df.columns else 0
-
-    # Build future time points (each step = 5 minutes)
-    future_offsets = [last_offset + (i + 1) * 5 for i in range(steps)]
-
+    forecast = forecast_vitals(periodic, steps=steps)
+    simulated = simulate_what_if(forecast, fio2_delta=fio2_delta, vasopressor_delta=vasopressor_delta)
+    deterioration = deterioration_score(row)
     return {
-        "patient_id": patient_id,
-        "steps": steps,
-        "future_offsets": future_offsets,
         "forecast": forecast,
-        "note": "Forecast using exponential weighted moving average"
+        "simulated_forecast": simulated,
+        "deterioration": deterioration,
+        "alert_thresholds": ALERT_THRESHOLDS,
+        "latest_labs": to_json(labs.tail(20)),
+        "latest_nurse_charting": to_json(nurse.tail(20)),
     }
 
 
 @app.get("/analytics/unit-breakdown")
-def unit_breakdown():
-    """Get patient distribution by ICU unit type."""
-    from utils.db_manager import get_conn
-    conn = get_conn()
-    df = pd.read_sql(
-        "SELECT unittype, COUNT(*) as count, AVG(hospital_mortality)*100 as mortality_pct, AVG(apachescore) as avg_apache FROM patients GROUP BY unittype ORDER BY count DESC",
-        conn
+def analytics_unit_breakdown():
+    df = analytics_query(
+        """
+        SELECT unittype,
+               COUNT(*) AS patient_count,
+               AVG(hospital_mortality) * 100 AS mortality_pct,
+               AVG(apachescore) AS avg_apache,
+               AVG(icu_los_hours) AS avg_los_hours
+        FROM ml_dataset
+        GROUP BY unittype
+        ORDER BY patient_count DESC
+        """
     )
-    conn.close()
-    return df_to_json(df)
+    return to_json(df)
 
 
 @app.get("/analytics/mortality-by-age")
-def mortality_by_age():
-    """Get mortality rate by age group."""
-    from utils.db_manager import get_conn
-    conn = get_conn()
-    df = pd.read_sql("SELECT age, hospital_mortality FROM patients WHERE age IS NOT NULL", conn)
-    conn.close()
-    df["age_group"] = pd.cut(df["age"], bins=[0, 18, 40, 60, 75, 120],
-                              labels=["<18", "18-40", "40-60", "60-75", "75+"])
-    result = df.groupby("age_group", observed=True).agg(
-        count=("hospital_mortality", "count"),
-        mortality_pct=("hospital_mortality", lambda x: round(x.mean() * 100, 2))
-    ).reset_index()
-    return df_to_json(result)
+def analytics_mortality_by_age():
+    df = analytics_query("SELECT age, hospital_mortality FROM ml_dataset WHERE age IS NOT NULL")
+    if df.empty:
+        return []
+    df["age_group"] = pd.cut(
+        df["age"],
+        bins=[0, 18, 40, 60, 75, 120],
+        labels=["<18", "18-40", "40-60", "60-75", "75+"],
+        include_lowest=True,
+    )
+    result = (
+        df.groupby("age_group", observed=True)
+        .agg(count=("hospital_mortality", "count"), mortality_pct=("hospital_mortality", lambda s: s.mean() * 100))
+        .reset_index()
+    )
+    return to_json(result)
 
 
 @app.get("/analytics/top-diagnoses")
-def top_diagnoses(limit: int = 15):
-    """Get most common diagnoses."""
-    from utils.db_manager import get_conn
-    conn = get_conn()
-    df = pd.read_sql(
-        f"SELECT diagnosisstring, COUNT(*) as count FROM diagnosis GROUP BY diagnosisstring ORDER BY count DESC LIMIT {limit}",
-        conn
+def analytics_top_diagnoses(limit: int = 15):
+    df = analytics_query(
+        f"""
+        SELECT diagnosisstring, COUNT(*) AS count
+        FROM diagnosis
+        GROUP BY diagnosisstring
+        ORDER BY count DESC
+        LIMIT {int(limit)}
+        """
     )
-    conn.close()
-    return df_to_json(df)
+    return to_json(df)
+
+
+@app.get("/analytics/vasopressor-usage")
+def analytics_vasopressor_usage():
+    df = analytics_query(
+        """
+        SELECT unittype, AVG(on_vasopressor) * 100 AS vasopressor_pct
+        FROM ml_dataset
+        GROUP BY unittype
+        ORDER BY vasopressor_pct DESC
+        """
+    )
+    return to_json(df)
+
+
+@app.get("/analytics/ventilator-usage")
+def analytics_ventilator_usage():
+    df = analytics_query(
+        """
+        SELECT unittype, AVG(on_ventilator) * 100 AS ventilator_pct
+        FROM ml_dataset
+        GROUP BY unittype
+        ORDER BY ventilator_pct DESC
+        """
+    )
+    return to_json(df)
+
+
+@app.get("/analytics/fluid-balance")
+def analytics_fluid_balance():
+    df = analytics_query(
+        """
+        SELECT hospital_mortality,
+               AVG(fluid_balance_24h) AS avg_fluid_balance,
+               AVG(urine_output_per_hour) AS avg_urine_output_per_hour
+        FROM ml_dataset
+        GROUP BY hospital_mortality
+        """
+    )
+    return to_json(df)
 
 
 if __name__ == "__main__":
-    log.info(f"Starting ICU Analytics API on {API_HOST}:{API_PORT}")
-    uvicorn.run("api:app", host=API_HOST, port=API_PORT, reload=False)
+    uvicorn.run(app, host=API_HOST, port=API_PORT)

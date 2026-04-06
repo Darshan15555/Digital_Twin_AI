@@ -1,184 +1,228 @@
-# 🏥 ICU Analytics System
+# ICU Analytics System
 
-A **production-ready local ICU monitoring + analytics + digital twin system** powered by the eICU Collaborative Research Database.
+ICU analytics, ML, and dashboarding project built on the eICU Collaborative Research Database v2.0.
 
----
+## Project Structure
 
-## 🏗️ Architecture
-
-```
-icu_system/
-├── config/
-│   └── config.py          ← All paths & settings
-├── utils/
-│   ├── data_loader.py     ← Loads .csv.gz files (chunked), caches to Parquet
-│   └── db_manager.py      ← SQLite read/write helpers
-├── models/
-│   └── ml_model.py        ← Random Forest mortality predictor + Digital Twin
+```text
+icu_analytics_system/
 ├── backend/
-│   └── api.py             ← FastAPI REST backend
+│   └── api.py
+├── config/
+│   └── config.py
 ├── frontend/
-│   └── dashboard.py       ← Streamlit dashboard UI
-├── data/                  ← Auto-created: SQLite DB + Parquet cache
-├── setup.py               ← Run ONCE to process data + train model
-├── generate_demo_data.py  ← Generate synthetic data (no eICU needed)
-├── launch.bat             ← Windows launcher menu
-└── requirements.txt
+│   └── dashboard.py
+├── ingestion/
+│   ├── config.py
+│   ├── stream_reader.py
+│   ├── transformer.py
+│   ├── db_writer.py
+│   ├── pipeline.py
+│   └── README.md
+├── models/
+│   ├── digital_twin.py
+│   └── ml_model.py
+├── utils/
+│   ├── data_loader.py
+│   ├── db_manager.py
+│   └── feature_engineer.py
+├── data/
+│   ├── icu_data.db
+│   └── parquet/
+├── ingest.py
+├── requirements.txt
+└── setup.py
 ```
 
----
+## Configuration
 
-## ⚡ Quick Start
+Runtime settings are loaded from [.env](/d:/sem_6/MiniProject/Project/icu_analytics_system/.env).
 
-### Option A — With Real eICU Data
+Example:
 
-1. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+```env
+EICU_RAW_PATH=D:\physionet-data\eicu
+DATA_PATH=D:\physionet-data\eicu\eicu-collaborative-research-database-2.0
+API_HOST=127.0.0.1
+API_PORT=8000
+DATABASE_URL=postgresql+psycopg://postgres:yourpassword@localhost:5432/icu_db
+DB_SCHEMA=raw_eicu
+CHUNK_SIZE=50000
+INSERT_BATCH_SIZE=10000
+MAX_WORKERS=2
+IMPORTANT_FILES=patient.csv.gz,admissionDx.csv.gz,lab.csv.gz,vitalPeriodic.csv.gz
+```
 
-2. **Configure your data path** in `config/config.py`:
-   ```python
-   EICU_RAW_PATH = Path(r"D:\physionet-data\eicu\eicu-collaborative-research-database-2.0")
-   ```
+## Available Pipelines
 
-3. **Run setup** (once — takes 5–15 min depending on disk speed):
-   ```bash
-   python setup.py
-   ```
+`setup.py` remains the existing local workflow:
 
-4. **Start the backend** (Terminal 1):
-   ```bash
-   python backend/api.py
-   ```
+- validates expected source files
+- preprocesses selected tables with chunked reads
+- writes parquet cache to `data/parquet/`
+- loads SQLite tables into `data/icu_data.db`
+- builds the ML dataset and model artifacts
 
-5. **Start the dashboard** (Terminal 2):
-   ```bash
-   streamlit run frontend/dashboard.py
-   ```
+`ingest.py` is the new production-style raw ingestion workflow:
 
-6. Open browser → **http://localhost:8501**
+- auto-discovers `.csv.gz` files under `DATA_PATH`
+- reads directly from gzip without manual decompression
+- processes data in chunks only
+- creates PostgreSQL schema and tables automatically
+- inserts rows with PostgreSQL `COPY` in configurable batches
+- logs per-file and per-chunk progress to `ingestion.log`
+- skips malformed rows and failed chunks without stopping the whole pipeline
+- supports selective loading of important files first
+- accepts file selectors like `lab` as well as `lab.csv.gz`
 
----
+## Setup
 
-### Option B — Without eICU (Demo/Test Mode)
+1. Create and activate a virtual environment.
+2. Install dependencies:
 
-1. Generate synthetic ICU data:
-   ```bash
-   python generate_demo_data.py
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-2. Update `config/config.py`:
-   ```python
-   EICU_RAW_PATH = Path("demo_data")
-   ```
+3. Confirm the dataset path and database URL in [.env](/d:/sem_6/MiniProject/Project/icu_analytics_system/.env).
 
-3. Continue from Step 3 above.
+## Existing Local Workflow
 
----
+Run:
 
-### Windows One-Click Launcher
-Double-click **`launch.bat`** for a menu-driven launcher.
+```bash
+python setup.py
+```
 
----
+This prepares the existing SQLite-backed app used by the FastAPI and Streamlit components.
 
-## 🌐 API Endpoints
+## Production PostgreSQL Ingestion
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /stats` | System-wide ICU statistics |
-| `GET /patients` | List patients (with filtering) |
-| `GET /patients/{id}` | Patient details |
-| `GET /patients/{id}/vitals` | Vital signs time-series |
-| `GET /patients/{id}/labs` | Lab results |
-| `GET /patients/{id}/diagnosis` | Diagnoses |
-| `GET /patients/{id}/treatments` | Treatments |
-| `GET /patients/{id}/predict` | ML mortality prediction |
-| `GET /patients/{id}/digital-twin` | Forecast next vitals |
-| `GET /analytics/unit-breakdown` | Stats by ICU unit |
-| `GET /analytics/mortality-by-age` | Mortality by age group |
-| `GET /analytics/top-diagnoses` | Most common diagnoses |
+Load every discovered `.csv.gz` file:
 
-**Interactive API docs:** http://127.0.0.1:8000/docs
+```bash
+python ingest.py
+```
 
----
+Load only the important files:
 
-## 🧠 ML Model
+```bash
+python ingest.py --important-only
+```
 
-- **Algorithm:** Random Forest Classifier (100 trees, depth 8)
-- **Target:** Hospital mortality (binary)
-- **Features:** Age, APACHE score, mean vitals (HR, SpO2, BP, temp, resp), lab values
-- **Output:** Risk score (0–1), risk label (LOW / MODERATE / HIGH), top predictive features
-- **Storage:** `models/mortality_model.pkl` — trained once, reloaded on every run
+Load a custom subset:
 
----
+```bash
+python ingest.py --files patient.csv.gz admissionDx.csv.gz lab.csv.gz vitalPeriodic.csv.gz
+```
 
-## 📡 Digital Twin
+Short selectors work too:
 
-The digital twin forecasts the next N vital sign values (default: 6 steps × 5 min = 30 min) using:
-- **Exponential Weighted Moving Average** for base value
-- **Linear trend component** (weighted at 30%)
-- **Confidence bands** based on recent observation variance
+```bash
+python ingest.py --files patient lab vitalPeriodic
+```
 
----
+Enable file-level multiprocessing:
 
-## ⚙️ Performance Design
+```bash
+python ingest.py --important-only --parallel
+```
 
-| Problem | Solution |
-|---------|----------|
-| Large .csv.gz files | Chunked reading (50k rows/chunk) |
-| Slow re-processing | Parquet cache (read once, reuse forever) |
-| Heavy memory usage | Only load needed columns |
-| Slow API queries | SQLite with indexed patientunitstayid |
-| Model retraining | Pickled model, load on startup |
+## Analytics Layer
 
----
+Build a curated one-row-per-patient table from the raw PostgreSQL landing tables:
 
-## 🔧 Configuration
+```bash
+python build_patient_summary.py
+```
 
-Edit `config/config.py` to change:
-- `EICU_RAW_PATH` — where your .csv.gz files live
-- `CHUNK_SIZE` — rows per chunk (default 50,000)
-- `VITALS_SAMPLE_ROWS` — how many vitalPeriodic rows to load (default 500,000)
-- `API_PORT` — backend port (default 8000)
+Use a custom analytics schema if needed:
 
----
+```bash
+python build_patient_summary.py --analytics-schema analytics
+```
 
-## 🔒 Future Security Extensions
+This creates `analytics.patient_summary` by joining:
 
-The codebase is structured for easy extension:
-- Add JWT authentication to `backend/api.py`
-- Add HTTPS via `uvicorn --ssl-keyfile/certfile`
-- Add role-based access (doctor/nurse/admin) as middleware
-- Replace SQLite with PostgreSQL for multi-user access
+- `raw_eicu.patient`
+- `raw_eicu.lab`
+- `raw_eicu.vital_periodic`
+- `raw_eicu.admission_dx`
 
----
+The curated table keeps raw ingestion untouched and gives you a clean base for dashboards, feature engineering, and ML training.
 
-## 📊 Dashboard Pages
+## Preprocessing Layer
 
-| Page | Features |
-|------|----------|
-| **Overview** | System stats, unit breakdown, mortality by age, top diagnoses |
-| **Patient Search** | Filter by ID/unit/risk, sortable table |
-| **Patient Detail** | Vitals charts, lab trends, diagnosis list, ML prediction gauge |
-| **Analytics** | Population-level charts, APACHE vs mortality |
-| **Digital Twin** | Vital forecasting with confidence bands |
+Build a production-style ML-ready dataset directly in PostgreSQL:
 
----
+```bash
+python build_ml_dataset.py
+```
 
-## 🐛 Troubleshooting
+Use a custom target schema if needed:
 
-**"Cannot connect to backend"**
-→ Start `python backend/api.py` first
+```bash
+python build_ml_dataset.py --target-schema ml_prep
+```
 
-**"Patient not found"**
-→ Run `python setup.py` to populate the database
+This preprocessing pipeline:
 
-**"ML model not trained"**
-→ Run `python setup.py` — it trains automatically
+- cleans invalid numeric and text values
+- removes duplicate patient records safely
+- imputes missing values for core patient-level fields
+- aggregates `lab` and `vital_periodic` into one-row-per-patient features
+- adds categorical encodings and engineered features
+- writes the final ML-ready dataset to `ml_prep.ml_dataset`
+- saves a JSON summary to `preprocessing_report.json`
 
-**Setup is slow**
-→ Normal for first run. Subsequent runs use Parquet cache (instant).
+By default the preprocessing pipeline reads labs from `raw_eicu.lab_subset`. Override with `LAB_SOURCE_TABLE=lab` in `.env` if you want to use the full raw lab table later.
 
-**Out of memory**
-→ Reduce `VITALS_SAMPLE_ROWS` in `config/config.py`
+## Baseline Training
+
+Train baseline mortality models from the PostgreSQL preprocessing output:
+
+```bash
+python train_postgres_model.py
+```
+
+This trains:
+
+- a full class-balanced Random Forest baseline
+- a full class-balanced Logistic Regression baseline
+- an early-prediction Random Forest without LOS-derived leakage features
+- an early-prediction Logistic Regression without LOS-derived leakage features
+
+Artifacts are written to `models/` and `data/artifacts/`, including metrics and top feature importances.
+
+## Threshold Tuning
+
+Evaluate operating thresholds for the early Random Forest mortality model:
+
+```bash
+python tune_early_thresholds.py
+```
+
+This writes a threshold comparison report to `data/artifacts/postgres_early_thresholds.json` with suggested balanced, high-recall, and higher-precision operating points.
+
+## Early Prediction Serving
+
+The tuned early mortality model uses `EARLY_MORTALITY_THRESHOLD` from `.env`.
+
+Recommended default:
+
+```env
+EARLY_MORTALITY_THRESHOLD=0.60
+```
+
+## Module Responsibilities
+
+- `ingestion/stream_reader.py`: file discovery and chunked gzip streaming with csv fallback
+- `ingestion/transformer.py`: chunk-level cleaning, type normalization, null handling, and table mapping
+- `ingestion/db_writer.py`: PostgreSQL schema creation, table alignment, indexing, and streaming `COPY` batch inserts
+- `ingestion/pipeline.py`: orchestration, logging, selective loading, and optional multiprocessing
+
+## Notes
+
+- The production ingestion path does not load entire source files into memory.
+- The PostgreSQL loader is append-oriented and suitable for raw landing-zone ingestion.
+- The transformer currently applies light standardization so future downstream marts, feature stores, or cloud jobs can build on a stable raw schema.

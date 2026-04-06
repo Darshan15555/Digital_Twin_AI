@@ -1,260 +1,153 @@
 """
-db_manager.py
-Manages SQLite database for processed ICU data.
+SQLite helpers for the ICU analytics system.
 """
 
-import sqlite3
-import pandas as pd
-import logging
-from pathlib import Path
-import sys
+from __future__ import annotations
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import logging
+import sqlite3
+
+import pandas as pd
+
 from config.config import SQLITE_DB_PATH
 
 log = logging.getLogger(__name__)
 
+INDEXED_TABLES = [
+    "patients",
+    "vitals_periodic",
+    "vitals_aperiodic",
+    "labs",
+    "diagnosis",
+    "treatments",
+    "medications",
+    "infusions",
+    "nurse_charting",
+    "respiratory_care",
+    "intake_output_summary",
+    "comorbidities",
+    "ml_dataset",
+]
 
-def get_conn():
+
+def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(SQLITE_DB_PATH), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
-def init_db():
+def init_db() -> None:
     conn = get_conn()
-    c = conn.cursor()
+    conn.close()
+    log.info("SQLite database ready at %s", SQLITE_DB_PATH)
 
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS patients (
-        patientunitstayid INTEGER PRIMARY KEY,
-        age REAL,
-        gender TEXT,
-        ethnicity TEXT,
-        admissionheight REAL,
-        admissionweight REAL,
-        unittype TEXT,
-        unitadmitsource TEXT,
-        unitdischargestatus TEXT,
-        hospitaldischargestatus TEXT,
-        hospital_mortality INTEGER,
-        apachescore REAL,
-        predictedhospitalmortality REAL,
-        unitdischargeoffset REAL,
-        hr_mean REAL, hr_std REAL,
-        sao2_mean REAL, sao2_min REAL,
-        resp_mean REAL,
-        sbp_mean REAL, dbp_mean REAL, temp_mean REAL,
-        ml_risk_score REAL,
-        ml_prediction INTEGER
-    )
-    """)
 
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS vitals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        patientunitstayid INTEGER,
-        observationoffset REAL,
-        heartrate REAL,
-        respiration REAL,
-        sao2 REAL,
-        systemicsystolic REAL,
-        systemicdiastolic REAL,
-        temperature REAL,
-        cvp REAL
-    )
-    """)
-
-    c.execute("CREATE INDEX IF NOT EXISTS idx_vitals_pid ON vitals(patientunitstayid)")
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS labs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        patientunitstayid INTEGER,
-        labresultoffset REAL,
-        labname TEXT,
-        labresult REAL
-    )
-    """)
-
-    c.execute("CREATE INDEX IF NOT EXISTS idx_labs_pid ON labs(patientunitstayid)")
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS diagnosis (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        patientunitstayid INTEGER,
-        diagnosisoffset REAL,
-        diagnosisstring TEXT,
-        icd9code TEXT,
-        diagnosispriority TEXT
-    )
-    """)
-
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS treatments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        patientunitstayid INTEGER,
-        treatmentoffset REAL,
-        treatmentstring TEXT
-    )
-    """)
-
+def write_table(name: str, df: pd.DataFrame, if_exists: str = "replace") -> None:
+    conn = get_conn()
+    df.to_sql(name, conn, if_exists=if_exists, index=False)
+    if "patientunitstayid" in df.columns:
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{name}_pid ON {name}(patientunitstayid)")
     conn.commit()
     conn.close()
-    log.info("SQLite DB initialized")
+    log.info("Saved %s with %s rows", name, f"{len(df):,}")
 
 
-def save_patients_to_db(df: pd.DataFrame):
-    """Save patient summary to SQLite patients table."""
+def write_processed_tables(tables: dict[str, pd.DataFrame]) -> None:
+    for name, df in tables.items():
+        write_table(name, df)
+
+
+def table_count(name: str) -> int:
     conn = get_conn()
-    cols = [
-        "patientunitstayid", "age", "gender", "ethnicity",
-        "admissionheight", "admissionweight", "unittype",
-        "unitadmitsource", "unitdischargestatus", "hospitaldischargestatus",
-        "hospital_mortality", "apachescore", "predictedhospitalmortality",
-        "unitdischargeoffset",
-        "hr_mean", "hr_std", "sao2_mean", "sao2_min",
-        "resp_mean", "sbp_mean", "dbp_mean", "temp_mean"
-    ]
-    available = [c for c in cols if c in df.columns]
-    # Always include ml columns (as NULL) so UPDATE works later
-    df = df[available].copy()
-    df["ml_risk_score"] = None
-    df["ml_prediction"] = None
-    df.to_sql("patients", conn, if_exists="replace", index=False)
+    count = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
     conn.close()
-    log.info(f"Saved {len(df)} patients to SQLite")
+    return int(count)
 
 
-def save_vitals_to_db(df: pd.DataFrame):
+def query_df(sql: str, params: tuple | list | None = None) -> pd.DataFrame:
     conn = get_conn()
-    df.to_sql("vitals", conn, if_exists="replace", index=False)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_vitals_pid ON vitals(patientunitstayid)")
-    conn.commit()
-    conn.close()
-    log.info(f"Saved {len(df):,} vitals rows to SQLite")
-
-
-def save_labs_to_db(df: pd.DataFrame):
-    conn = get_conn()
-    df[["patientunitstayid", "labresultoffset", "labname", "labresult"]].to_sql(
-        "labs", conn, if_exists="replace", index=False
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_labs_pid ON labs(patientunitstayid)")
-    conn.commit()
-    conn.close()
-    log.info(f"Saved {len(df):,} lab rows to SQLite")
-
-
-def save_diagnosis_to_db(df: pd.DataFrame):
-    conn = get_conn()
-    cols = ["patientunitstayid", "diagnosisoffset", "diagnosisstring", "icd9code", "diagnosispriority"]
-    available = [c for c in cols if c in df.columns]
-    df[available].to_sql("diagnosis", conn, if_exists="replace", index=False)
-    conn.commit()
-    conn.close()
-
-
-def save_treatments_to_db(df: pd.DataFrame):
-    conn = get_conn()
-    df[["patientunitstayid", "treatmentoffset", "treatmentstring"]].to_sql(
-        "treatments", conn, if_exists="replace", index=False
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_patient_list(limit=500, offset=0):
-    conn = get_conn()
-    df = pd.read_sql(
-        f"SELECT * FROM patients ORDER BY patientunitstayid LIMIT {limit} OFFSET {offset}",
-        conn
-    )
+    df = pd.read_sql(sql, conn, params=params)
     conn.close()
     return df
 
 
-def get_patient_by_id(pid: int):
-    conn = get_conn()
-    df = pd.read_sql(
-        "SELECT * FROM patients WHERE patientunitstayid = ?",
-        conn, params=(pid,)
-    )
-    conn.close()
-    return df
-
-
-def get_vitals_by_patient(pid: int):
-    conn = get_conn()
-    df = pd.read_sql(
-        "SELECT * FROM vitals WHERE patientunitstayid = ? ORDER BY observationoffset",
-        conn, params=(pid,)
-    )
-    conn.close()
-    return df
-
-
-def get_labs_by_patient(pid: int):
-    conn = get_conn()
-    df = pd.read_sql(
-        "SELECT * FROM labs WHERE patientunitstayid = ? ORDER BY labresultoffset",
-        conn, params=(pid,)
-    )
-    conn.close()
-    return df
-
-
-def get_diagnosis_by_patient(pid: int):
-    conn = get_conn()
-    df = pd.read_sql(
-        "SELECT * FROM diagnosis WHERE patientunitstayid = ?",
-        conn, params=(pid,)
-    )
-    conn.close()
-    return df
-
-
-def get_treatments_by_patient(pid: int):
-    conn = get_conn()
-    df = pd.read_sql(
-        "SELECT * FROM treatments WHERE patientunitstayid = ?",
-        conn, params=(pid,)
-    )
-    conn.close()
-    return df
-
-
-def update_ml_scores(pid: int, risk_score: float, prediction: int):
-    conn = get_conn()
-    conn.execute(
-        "UPDATE patients SET ml_risk_score = ?, ml_prediction = ? WHERE patientunitstayid = ?",
-        (risk_score, prediction, pid)
-    )
-    conn.commit()
-    conn.close()
-
-
-def count_patients():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM patients")
-    n = c.fetchone()[0]
-    conn.close()
-    return n
-
-
-def get_stats():
-    conn = get_conn()
-    stats = {}
-    stats["total_patients"] = pd.read_sql("SELECT COUNT(*) as n FROM patients", conn)["n"][0]
-    stats["mortality_rate"] = pd.read_sql("SELECT AVG(hospital_mortality) as r FROM patients", conn)["r"][0]
-    stats["avg_age"] = pd.read_sql("SELECT AVG(age) as a FROM patients", conn)["a"][0]
-    stats["avg_apache"] = pd.read_sql("SELECT AVG(apachescore) as s FROM patients WHERE apachescore IS NOT NULL", conn)["s"][0]
-    conn.close()
+def get_stats() -> dict:
+    stats = query_df(
+        """
+        SELECT
+            COUNT(*) AS total_patients,
+            AVG(hospital_mortality) AS mortality_rate,
+            AVG(apachescore) AS avg_apache_score,
+            AVG(icu_los_hours) AS avg_icu_los_hours
+        FROM ml_dataset
+        """
+    ).iloc[0].to_dict()
     return stats
 
 
-if __name__ == "__main__":
-    init_db()
-    print("DB init OK")
+def get_patients_filtered(
+    limit: int = 100,
+    offset: int = 0,
+    search: str | None = None,
+    unit: str | None = None,
+    risk_only: bool = False,
+    age_min: int | None = None,
+    age_max: int | None = None,
+    on_vasopressor: bool | None = None,
+    on_ventilator: bool | None = None,
+) -> pd.DataFrame:
+    sql = "SELECT * FROM ml_dataset WHERE 1=1"
+    params: list = []
+    if search:
+        if search.isdigit():
+            sql += " AND patientunitstayid = ?"
+            params.append(int(search))
+        else:
+            sql += " AND (unittype LIKE ? OR apacheadmissiondx LIKE ? OR gender LIKE ?)"
+            like = f"%{search}%"
+            params.extend([like, like, like])
+    if unit:
+        sql += " AND unittype = ?"
+        params.append(unit)
+    if risk_only:
+        sql += " AND (predicted_mortality_risk >= 0.5 OR qsofa_score >= 2 OR sepsis_risk = 1)"
+    if age_min is not None:
+        sql += " AND age >= ?"
+        params.append(age_min)
+    if age_max is not None:
+        sql += " AND age <= ?"
+        params.append(age_max)
+    if on_vasopressor is not None:
+        sql += " AND on_vasopressor = ?"
+        params.append(int(on_vasopressor))
+    if on_ventilator is not None:
+        sql += " AND on_ventilator = ?"
+        params.append(int(on_ventilator))
+    sql += " ORDER BY patientunitstayid LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    return query_df(sql, tuple(params))
+
+
+def get_patient(patient_id: int) -> pd.DataFrame:
+    return query_df("SELECT * FROM ml_dataset WHERE patientunitstayid = ?", (patient_id,))
+
+
+def get_patient_table(table: str, patient_id: int, order_by: str | None = None) -> pd.DataFrame:
+    sql = f"SELECT * FROM {table} WHERE patientunitstayid = ?"
+    if order_by:
+        sql += f" ORDER BY {order_by}"
+    return query_df(sql, (patient_id,))
+
+
+def update_prediction_fields(patient_id: int, fields: dict[str, float | int | str]) -> None:
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    params = list(fields.values()) + [patient_id]
+    conn = get_conn()
+    conn.execute(f"UPDATE ml_dataset SET {assignments} WHERE patientunitstayid = ?", params)
+    conn.commit()
+    conn.close()
+
+
+def analytics_query(sql: str) -> pd.DataFrame:
+    return query_df(sql)

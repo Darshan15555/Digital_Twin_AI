@@ -1,0 +1,14 @@
+{
+  "patient_base_clean_rows": 200859,
+  "lab_features_rows": 174112,
+  "vital_features_rows": 11297,
+  "diagnosis_features_rows": 177863,
+  "ml_dataset_rows": 200859,
+  "ml_dataset_distinct_patients": 200859,
+  "missing_summary": {
+    "admissionheight_nulls": 0,
+    "admissionweight_nulls": 0,
+    "creatinine_max_nulls": 0,
+    "heartrate_mean_nulls": 0
+  }
+}
