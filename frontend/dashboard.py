@@ -212,21 +212,76 @@ def page_predictions():
         st.info("Select a patient first.")
         return
 
+    early_mortality = get_json(f"/patients/{patient_id}/predict/early-mortality")
     mortality = get_json(f"/patients/{patient_id}/predict/mortality")
     los = get_json(f"/patients/{patient_id}/predict/los")
     sepsis = get_json(f"/patients/{patient_id}/predict/sepsis")
     patient = get_patient(patient_id)
 
     col1, col2, col3, col4 = st.columns(4)
+    if early_mortality:
+        col1.metric("Early Mortality Risk", f"{early_mortality['risk_score'] * 100:.1f}%")
     if mortality:
-        col1.metric("Mortality Risk", f"{mortality['risk_score'] * 100:.1f}%")
+        col2.metric("Mortality Risk", f"{mortality['risk_score'] * 100:.1f}%")
     if los:
-        col2.metric("Predicted LOS", f"{los['predicted_icu_los_hours']:.1f} hrs")
+        col3.metric("Predicted LOS", f"{los['predicted_icu_los_hours']:.1f} hrs")
     if sepsis:
-        col3.metric("qSOFA", sepsis["qsofa_score"])
-        col4.metric("Sepsis Risk", "High" if sepsis["sepsis_risk"] else "Low")
+        col4.metric("qSOFA", sepsis["qsofa_score"])
+
+    if sepsis:
+        st.metric("Sepsis Risk", "High" if sepsis["sepsis_risk"] else "Low")
+
+    if early_mortality:
+        st.subheader("Early Mortality Screening")
+        summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+        summary_col1.metric("Risk Label", early_mortality["risk_label"])
+        summary_col2.metric("Alert", "Yes" if early_mortality["alert"] else "No")
+        summary_col3.metric("Threshold", f"{early_mortality['threshold']:.2f}")
+        summary_col4.metric("Operating Mode", early_mortality["operating_mode"])
+
+        action_renderer = {
+            "HIGH": st.error,
+            "MODERATE": st.warning,
+            "LOW": st.success,
+        }.get(early_mortality["risk_label"], st.info)
+        action_renderer(f"Recommended action: {early_mortality['recommended_action']}")
+
+        early_gauge = go.Figure(
+            go.Indicator(
+                mode="gauge+number",
+                value=early_mortality["risk_score"] * 100,
+                title={"text": "Early Mortality Risk"},
+                gauge={
+                    "axis": {"range": [0, 100]},
+                    "steps": [
+                        {"range": [0, early_mortality["threshold"] * 100], "color": "#d9f2d9"},
+                        {"range": [early_mortality["threshold"] * 100, 70], "color": "#fff2cc"},
+                        {"range": [70, 100], "color": "#f4cccc"},
+                    ],
+                    "threshold": {
+                        "line": {"color": "#cc0000", "width": 4},
+                        "thickness": 0.75,
+                        "value": early_mortality["threshold"] * 100,
+                    },
+                },
+            )
+        )
+        st.plotly_chart(early_gauge, use_container_width=True)
+
+        early_feat_df = pd.DataFrame(early_mortality["top_features"], columns=["feature", "importance"])
+        st.plotly_chart(
+            px.bar(
+                early_feat_df,
+                x="importance",
+                y="feature",
+                orientation="h",
+                title="Top Early Model Features",
+            ),
+            use_container_width=True,
+        )
 
     if mortality:
+        st.subheader("Legacy Mortality Model")
         gauge = go.Figure(
             go.Indicator(
                 mode="gauge+number",

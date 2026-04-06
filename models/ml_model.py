@@ -89,6 +89,8 @@ MODEL_FEATURES = [
     "sofa_approx_score",
 ]
 
+EARLY_HIGH_RISK_THRESHOLD = 0.70
+
 
 def model_is_trained() -> bool:
     return (
@@ -244,18 +246,42 @@ def load_early_mortality_model():
     return model, imputer, features
 
 
+def _build_early_operating_mode(threshold: float) -> str:
+    if abs(threshold - 0.60) < 1e-9:
+        return "balanced_0.60"
+    if abs(threshold - 0.40) < 1e-9:
+        return "high_recall_0.40"
+    if abs(threshold - 0.65) < 1e-9:
+        return "higher_precision_0.65"
+    return f"custom_{threshold:.2f}"
+
+
+def _early_recommended_action(score: float, threshold: float) -> str:
+    if score >= EARLY_HIGH_RISK_THRESHOLD:
+        return "urgent review"
+    if score >= threshold:
+        return "clinical review recommended"
+    if score >= max(0.40, threshold - 0.20):
+        return "monitor closely"
+    return "routine monitoring"
+
+
 def predict_early_mortality(row: dict, threshold: float | None = None) -> dict:
     model, imputer, features = load_early_mortality_model()
     active_threshold = EARLY_MORTALITY_THRESHOLD if threshold is None else threshold
     X = _prepare_row(row, imputer, features)
     score = float(model.predict_proba(X)[0, 1])
     pred = int(score >= active_threshold)
+    risk_label = "HIGH" if score >= EARLY_HIGH_RISK_THRESHOLD else "MODERATE" if score >= active_threshold else "LOW"
     importances = sorted(zip(features, model.feature_importances_), key=lambda item: item[1], reverse=True)[:5]
     return {
         "risk_score": round(score, 4),
         "prediction": pred,
         "threshold": round(float(active_threshold), 2),
-        "risk_label": "HIGH" if score >= 0.7 else "MODERATE" if score >= active_threshold else "LOW",
+        "risk_label": risk_label,
+        "alert": bool(pred),
+        "operating_mode": _build_early_operating_mode(float(active_threshold)),
+        "recommended_action": _early_recommended_action(score, float(active_threshold)),
         "top_features": [(name, round(float(value), 4)) for name, value in importances],
         "model_variant": "early_random_forest",
     }
