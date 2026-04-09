@@ -21,6 +21,8 @@ def render_page() -> None:
             st.session_state["last_prediction"] = {"type": "early", "payload": fetch_predict_early_mortality(patient_id)}
         result = (st.session_state.get("last_prediction") or {}).get("payload") if (st.session_state.get("last_prediction") or {}).get("type") == "early" else fetch_predict_early_mortality(patient_id)
         if result:
+            if not result.get("model_ready", False):
+                st.warning("Early mortality model is not available. Run the training pipeline or restart the backend after training.")
             col1, col2 = st.columns([2, 3])
             with col1:
                 st.plotly_chart(risk_gauge(result["risk_score"]), use_container_width=True)
@@ -37,6 +39,8 @@ def render_page() -> None:
             st.session_state["last_prediction"] = {"type": "mortality", "payload": fetch_predict_mortality(patient_id)}
         result = (st.session_state.get("last_prediction") or {}).get("payload") if (st.session_state.get("last_prediction") or {}).get("type") == "mortality" else fetch_predict_mortality(patient_id)
         if result:
+            if not result.get("model_ready", False):
+                st.warning(result.get("interpretation", "Mortality model is not available."))
             c1, c2 = st.columns([2, 3])
             with c1:
                 st.plotly_chart(risk_gauge(result["risk_score"]), use_container_width=True)
@@ -51,6 +55,8 @@ def render_page() -> None:
             st.session_state["last_prediction"] = {"type": "los", "payload": fetch_predict_los(patient_id)}
         result = (st.session_state.get("last_prediction") or {}).get("payload") if (st.session_state.get("last_prediction") or {}).get("type") == "los" else fetch_predict_los(patient_id)
         if result:
+            if not result.get("model_ready", False):
+                st.info(result.get("note", "LOS is currently an estimate, not a trained model prediction."))
             st.plotly_chart(los_gauge(result["predicted_icu_los_hours"]), use_container_width=True)
             st.write(f"Predicted LOS: {result['predicted_icu_los_hours']:.1f} hours ({result['predicted_icu_los_days']:.1f} days)")
 

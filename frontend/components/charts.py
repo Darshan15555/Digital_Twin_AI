@@ -15,6 +15,18 @@ BASE_LAYOUT = {
 }
 
 
+def ensure_offset_hours(df: pd.DataFrame, source_column: str) -> pd.DataFrame:
+    normalized = df.copy()
+    if "offset_hours" in normalized.columns:
+        normalized["offset_hours"] = pd.to_numeric(normalized["offset_hours"], errors="coerce")
+        return normalized
+    if source_column in normalized.columns:
+        normalized["offset_hours"] = pd.to_numeric(normalized[source_column], errors="coerce") / 60.0
+    else:
+        normalized["offset_hours"] = pd.Series(dtype=float)
+    return normalized
+
+
 def _finish(fig: go.Figure, height: int) -> go.Figure:
     fig.update_layout(height=height, **BASE_LAYOUT)
     fig.update_xaxes(gridcolor="rgba(0,200,255,0.06)", showline=False, zeroline=False)
@@ -23,6 +35,7 @@ def _finish(fig: go.Figure, height: int) -> go.Figure:
 
 
 def vitals_multiplot(df_vitals: pd.DataFrame) -> go.Figure:
+    df_vitals = ensure_offset_hours(df_vitals, "observationoffset")
     fig = make_subplots(rows=3, cols=2, subplot_titles=["Heart Rate", "SpO2", "Respiration", "Systolic BP", "Temperature", "CVP"])
     mapping = [
         ("heartrate", "#FF4560", (40, 150), 1, 1),
@@ -32,7 +45,7 @@ def vitals_multiplot(df_vitals: pd.DataFrame) -> go.Figure:
         ("temperature", "#FFB830", (35.5, 38.5), 3, 1),
         ("cvp", "#60A5FA", (None, None), 3, 2),
     ]
-    x = df_vitals.get("offset_hours", df_vitals.get("observationoffset", pd.Series(dtype=float)) / 60.0)
+    x = df_vitals["offset_hours"]
     for column, color, thresholds, row, col in mapping:
         if column not in df_vitals.columns:
             continue
@@ -47,8 +60,7 @@ def vitals_multiplot(df_vitals: pd.DataFrame) -> go.Figure:
 
 
 def labs_chart(df_labs: pd.DataFrame, selected_labs: list[str]) -> go.Figure:
-    plot_df = df_labs[df_labs["labname"].isin(selected_labs)].copy()
-    plot_df["offset_hours"] = plot_df.get("offset_hours", plot_df["labresultoffset"] / 60.0)
+    plot_df = ensure_offset_hours(df_labs[df_labs["labname"].isin(selected_labs)].copy(), "labresultoffset")
     fig = px.line(plot_df, x="offset_hours", y="labresult", color="labname", markers=True)
     return _finish(fig, 380)
 
@@ -115,8 +127,9 @@ def vasopressor_ventilator_chart(vaso_data: pd.DataFrame, vent_data: pd.DataFram
 
 
 def digital_twin_chart(df_vitals: pd.DataFrame, forecast: dict, future_offsets: list[float], vital_name: str, color: str) -> go.Figure:
+    df_vitals = ensure_offset_hours(df_vitals, "observationoffset")
     fig = go.Figure()
-    x = df_vitals.get("offset_hours", df_vitals.get("observationoffset", pd.Series(dtype=float)) / 60.0)
+    x = df_vitals["offset_hours"]
     if vital_name in df_vitals.columns:
         fig.add_scatter(x=x, y=df_vitals[vital_name], mode="lines", name="Historical", line={"color": color})
     values = forecast.get(vital_name, {}).get("values", [])

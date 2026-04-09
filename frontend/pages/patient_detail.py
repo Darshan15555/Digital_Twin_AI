@@ -5,7 +5,7 @@ import streamlit as st
 
 from frontend.api_client import fetch_comorbidities, fetch_diagnosis, fetch_fluid_balance, fetch_labs, fetch_medications, fetch_patient, fetch_predict_early_mortality, fetch_predict_los, fetch_predict_sepsis, fetch_treatments, fetch_ventilation, fetch_vitals
 from frontend.components.cards import alert_banner, comorbidity_tags, patient_header_card, risk_badge, vital_status_dot
-from frontend.components.charts import feature_importance_chart, fluid_balance_chart, labs_chart, los_gauge, risk_gauge, sepsis_radar_chart, vitals_multiplot
+from frontend.components.charts import ensure_offset_hours, feature_importance_chart, fluid_balance_chart, labs_chart, los_gauge, risk_gauge, sepsis_radar_chart, vitals_multiplot
 
 
 def render_page() -> None:
@@ -36,7 +36,7 @@ def render_page() -> None:
     vitals_payload = fetch_vitals(patient_id) or {}
     periodic = pd.DataFrame(vitals_payload.get("periodic", []))
     if not periodic.empty:
-        periodic["offset_hours"] = periodic.get("offset_hours", periodic["observationoffset"] / 60.0)
+        periodic = ensure_offset_hours(periodic, "observationoffset")
     specs = [
         ("heartrate", "Heart Rate", (40, 55, 110, 150)),
         ("sao2", "SpO2", (90, 92, 100, 100)),
@@ -153,4 +153,3 @@ def render_page() -> None:
                 "sofa_score": sepsis.get("sofa_approx_score", 0),
             }
             st.plotly_chart(sepsis_radar_chart(criteria), use_container_width=True)
-

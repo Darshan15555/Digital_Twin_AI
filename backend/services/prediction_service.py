@@ -7,7 +7,7 @@ import pandas as pd
 from backend.services.patient_service import get_patient_by_id
 from config.settings import settings
 from models.digital_twin import deterioration_score, forecast_vitals, simulate_what_if
-from models.ml_model import _prepare_row, early_model_is_trained, load_early_mortality_model, load_models, model_is_trained, predict_sepsis as model_predict_sepsis
+from models.ml_model import _prepare_row, early_model_is_trained, load_early_mortality_model, load_models, load_postgres_full_mortality_model, model_is_trained, postgres_full_model_is_trained, predict_sepsis as model_predict_sepsis
 
 log = logging.getLogger(__name__)
 
@@ -16,12 +16,18 @@ def predict_mortality(pid: int) -> dict:
     not_ready = {"risk_score": 0.0, "risk_label": "UNKNOWN", "prediction": 0, "top_features": [], "interpretation": "ML model not trained yet. Run training pipeline first.", "model_ready": False}
     try:
         patient = get_patient_by_id(pid)
-        if patient is None or not model_is_trained():
+        if patient is None:
             return not_ready
-        model, _, _, _ = load_models()
+
+        if model_is_trained():
+            model, imputer, _, features = load_models()
+        elif postgres_full_model_is_trained():
+            model, imputer, features = load_postgres_full_mortality_model()
+        else:
+            return not_ready
+
         if hasattr(model, "n_jobs"):
             model.n_jobs = 1
-        _, imputer, _, features = load_models()
         X = _prepare_row(patient, imputer, features)
         score = float(model.predict_proba(X)[0, 1])
         prediction = int(score >= 0.5)
@@ -73,7 +79,7 @@ def predict_early_mortality(pid: int) -> dict:
 
 
 def predict_los(pid: int) -> dict:
-    default = {"los_hours": 0.0, "los_days": 0.0, "confidence_interval": [0.0, 0.0], "unit_avg_los_hours": None, "model_ready": False, "predicted_icu_los_hours": 0.0, "predicted_icu_los_days": 0.0}
+    default = {"los_hours": 0.0, "los_days": 0.0, "confidence_interval": [0.0, 0.0], "unit_avg_los_hours": None, "model_ready": False, "predicted_icu_los_hours": 0.0, "predicted_icu_los_days": 0.0, "note": "LOS model unavailable"}
     try:
         patient = get_patient_by_id(pid)
         if patient is None:

@@ -5,7 +5,7 @@ import streamlit as st
 
 from frontend.api_client import fetch_digital_twin, fetch_vitals
 from frontend.components.cards import alert_banner
-from frontend.components.charts import digital_twin_chart
+from frontend.components.charts import digital_twin_chart, ensure_offset_hours
 
 
 def render_page() -> None:
@@ -40,7 +40,7 @@ def render_page() -> None:
     if periodic.empty:
         st.warning("Historical vitals are unavailable for charting.")
         return
-    periodic["offset_hours"] = periodic.get("offset_hours", periodic["observationoffset"] / 60.0)
+    periodic = ensure_offset_hours(periodic, "observationoffset")
     last_x = float(periodic["offset_hours"].dropna().iloc[-1]) if not periodic["offset_hours"].dropna().empty else 0.0
     forecast_len = len(next(iter(twin.get("forecast", {}).values()), {}).get("values", []))
     future_offsets = [round(last_x + idx + 1, 2) for idx in range(forecast_len)]
@@ -65,4 +65,3 @@ def render_page() -> None:
                 row[field] = values[i] if i < len(values) else None
             rows.append(row)
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
-

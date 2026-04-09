@@ -32,6 +32,7 @@ from config.config import (
     MORTALITY_MODEL_PATH,
     MORTALITY_SCALER_PATH,
     MORTALITY_XGB_MODEL_PATH,
+    MODELS_DIR,
     POSTGRES_EARLY_FEATURE_NAMES_PATH,
     POSTGRES_EARLY_IMPUTER_PATH,
     POSTGRES_EARLY_MODEL_PATH,
@@ -90,6 +91,9 @@ MODEL_FEATURES = [
 ]
 
 EARLY_HIGH_RISK_THRESHOLD = 0.70
+POSTGRES_FULL_MODEL_PATH = MODELS_DIR / "mortality_postgres_rf.pkl"
+POSTGRES_FULL_IMPUTER_PATH = MODELS_DIR / "mortality_postgres_imputer.pkl"
+POSTGRES_FULL_FEATURE_NAMES_PATH = MODELS_DIR / "feature_names_postgres.pkl"
 
 
 def model_is_trained() -> bool:
@@ -239,10 +243,25 @@ def early_model_is_trained() -> bool:
     )
 
 
+def postgres_full_model_is_trained() -> bool:
+    return (
+        POSTGRES_FULL_MODEL_PATH.exists()
+        and POSTGRES_FULL_IMPUTER_PATH.exists()
+        and POSTGRES_FULL_FEATURE_NAMES_PATH.exists()
+    )
+
+
 def load_early_mortality_model():
     model = _load_pickle(POSTGRES_EARLY_MODEL_PATH)
     imputer = _load_pickle(POSTGRES_EARLY_IMPUTER_PATH)
     features = _load_pickle(POSTGRES_EARLY_FEATURE_NAMES_PATH)
+    return model, imputer, features
+
+
+def load_postgres_full_mortality_model():
+    model = _load_pickle(POSTGRES_FULL_MODEL_PATH)
+    imputer = _load_pickle(POSTGRES_FULL_IMPUTER_PATH)
+    features = _load_pickle(POSTGRES_FULL_FEATURE_NAMES_PATH)
     return model, imputer, features
 
 
