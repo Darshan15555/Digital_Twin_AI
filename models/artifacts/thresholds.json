@@ -1,0 +1,22 @@
+{
+  "mortality": {
+    "max_f1": 0.6000000000000002,
+    "max_f1_value": 0.4277722935176045,
+    "max_sensitivity_90": 0.00044140228419564664,
+    "max_specificity_90": 0.9987730383872986,
+    "balanced": 0.33235061168670654,
+    "default": 0.5,
+    "recommended": 0.6000000000000002,
+    "clinical_note": "Use max_sensitivity_90 for screening and max_specificity_90 for high-confidence action thresholds."
+  },
+  "deterioration": {
+    "max_f1": 0.25000000000000006,
+    "max_f1_value": 0.528961522548614,
+    "max_sensitivity_90": 0.08221364770450064,
+    "max_specificity_90": 0.29987599358978223,
+    "balanced": 0.19461248629438488,
+    "default": 0.5,
+    "recommended": 0.25000000000000006,
+    "clinical_note": "Use max_sensitivity_90 for screening and max_specificity_90 for high-confidence action thresholds."
+  }
+}

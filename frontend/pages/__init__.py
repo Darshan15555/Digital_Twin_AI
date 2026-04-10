@@ -1,1 +1,1 @@
-from . import analytics, digital_twin, overview, patient_detail, patient_search, predictions
+from . import analytics, overview, patient_detail, patient_search, predictions

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
-from backend.dependencies import IS_POSTGRES, get_table_columns, query_df
-from config.settings import settings
+from backend.dependencies import IS_POSTGRES, get_table_columns, query_df, table_exists
 from utils.sanitize import safe_float, safe_int, sanitize_df, sanitize_row
 
 log = logging.getLogger(__name__)
@@ -23,13 +21,28 @@ def build_patient_select(requested_cols: list[str]) -> str:
 def get_system_stats() -> dict:
     try:
         if IS_POSTGRES:
-            df = query_df(
+            apache_expr = "NULL::numeric"
+            pg_cols = query_df(
                 """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'ml_prep'
+                  AND table_name = 'ml_dataset'
+                """
+            )
+            if not pg_cols.empty:
+                available_pg_cols = set(pg_cols["column_name"].tolist())
+                if "apachescore" in available_pg_cols:
+                    apache_expr = "AVG(m.apachescore)"
+                elif "apache_score" in available_pg_cols:
+                    apache_expr = "AVG(m.apache_score)"
+            df = query_df(
+                f"""
                 SELECT
                     COUNT(*) AS total_patients,
-                    AVG(m.hospital_mortality) * 100 AS mortality_rate,
+                    AVG(m.hospital_mortality) AS mortality_rate,
                     AVG(CASE WHEN p.age = '> 89' THEN 90 ELSE NULLIF(p.age, '')::numeric END) AS avg_age,
-                    NULL::numeric AS avg_apache_score,
+                    {apache_expr} AS avg_apache_score,
                     AVG(m.icu_los_hours) AS avg_icu_los_hours,
                     0::bigint AS total_on_vasopressor,
                     0::bigint AS total_on_ventilator,
@@ -39,18 +52,20 @@ def get_system_stats() -> dict:
                     ON p.patientunitstayid = m.patientunitstayid
                 """
             )
-            row = df.iloc[0].to_dict() if not df.empty else {}
-            return {
-                "total_patients": safe_int(row.get("total_patients"), 0),
-                "mortality_rate": safe_float(row.get("mortality_rate"), 0.0),
-                "avg_age": safe_float(row.get("avg_age"), 0.0),
-                "avg_apache_score": safe_float(row.get("avg_apache_score"), 0.0) or 0.0,
-                "avg_icu_los_hours": safe_float(row.get("avg_icu_los_hours"), 0.0),
-                "total_on_vasopressor": safe_int(row.get("total_on_vasopressor"), 0),
-                "total_on_ventilator": safe_int(row.get("total_on_ventilator"), 0),
-                "total_sepsis_risk": safe_int(row.get("total_sepsis_risk"), 0),
-                "model_ready": Path(settings.resolve_path(settings.EARLY_MORTALITY_MODEL_PATH)).exists() or Path(settings.resolve_path(settings.MORTALITY_MODEL_PATH)).exists(),
-            }
+            if not df.empty:
+                row = df.iloc[0].to_dict()
+                return {
+                    "total_patients": safe_int(row.get("total_patients"), 0),
+                    "mortality_rate": safe_float(row.get("mortality_rate"), 0.0),
+                    "avg_age": safe_float(row.get("avg_age"), 0.0),
+                    "avg_apache_score": safe_float(row.get("avg_apache_score"), 0.0) or 0.0,
+                    "avg_icu_los_hours": safe_float(row.get("avg_icu_los_hours"), 0.0),
+                    "total_on_vasopressor": safe_int(row.get("total_on_vasopressor"), 0),
+                    "total_on_ventilator": safe_int(row.get("total_on_ventilator"), 0),
+                    "total_sepsis_risk": safe_int(row.get("total_sepsis_risk"), 0),
+                    "model_ready": False,
+                }
+            log.warning("PostgreSQL stats query returned no rows; falling back to local tables when available.")
 
         available = get_available_patient_columns()
         stats = {}
@@ -58,16 +73,23 @@ def get_system_stats() -> dict:
         stats["total_patients"] = safe_int(df.iloc[0]["n"], 0) if not df.empty else 0
         stats["mortality_rate"] = 0.0
         if "hospital_mortality" in available:
-            df = query_df("SELECT AVG(CAST(hospital_mortality AS FLOAT)) * 100 AS r FROM patients")
+            df = query_df("SELECT AVG(CAST(hospital_mortality AS FLOAT)) AS r FROM patients")
             stats["mortality_rate"] = safe_float(df.iloc[0]["r"] if not df.empty else None, 0.0)
         stats["avg_age"] = 0.0
         if "age" in available:
             df = query_df("SELECT AVG(age) AS a FROM patients WHERE age IS NOT NULL AND age > 0")
             stats["avg_age"] = safe_float(df.iloc[0]["a"] if not df.empty else None, 0.0)
         stats["avg_apache_score"] = 0.0
-        if "apachescore" in available:
-            df = query_df("SELECT AVG(apachescore) AS s FROM patients WHERE apachescore IS NOT NULL")
-            stats["avg_apache_score"] = safe_float(df.iloc[0]["s"] if not df.empty else None, 0.0)
+        if table_exists("ml_dataset"):
+            ml_cols = get_table_columns("ml_dataset")
+            if "apachescore" in ml_cols:
+                df = query_df("SELECT AVG(apachescore) AS s FROM ml_dataset WHERE apachescore IS NOT NULL")
+                stats["avg_apache_score"] = safe_float(df.iloc[0]["s"] if not df.empty else None, 0.0)
+        elif table_exists("apache"):
+            apache_cols = get_table_columns("apache")
+            if "apachescore" in apache_cols:
+                df = query_df("SELECT AVG(apachescore) AS s FROM apache WHERE apachescore IS NOT NULL")
+                stats["avg_apache_score"] = safe_float(df.iloc[0]["s"] if not df.empty else None, 0.0)
         stats["avg_icu_los_hours"] = 0.0
         los_col = next((c for c in ["icu_los_hours", "unitdischargeoffset"] if c in available), None)
         if los_col:
@@ -77,7 +99,7 @@ def get_system_stats() -> dict:
         stats["total_on_vasopressor"] = 0
         stats["total_on_ventilator"] = 0
         stats["total_sepsis_risk"] = 0
-        stats["model_ready"] = Path(settings.resolve_path(settings.MORTALITY_MODEL_PATH)).exists()
+        stats["model_ready"] = False
         return stats
     except Exception as exc:
         log.error("get_system_stats error: %s", exc, exc_info=True)

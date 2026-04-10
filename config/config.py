@@ -23,7 +23,6 @@ INTAKE_OUTPUT_MAX_ROWS = 500_000
 API_HOST = os.getenv("API_HOST", "127.0.0.1")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{SQLITE_DB_PATH}")
-EARLY_MORTALITY_THRESHOLD = float(os.getenv("EARLY_MORTALITY_THRESHOLD", "0.60"))
 
 FILE_NAMES = {
     "patient": "patient.csv.gz",
@@ -58,19 +57,7 @@ PRIMARY_TABLES = [
 DERIVED_TABLES = [
     "intake_output_summary",
     "comorbidities",
-    "ml_dataset",
 ]
-
-MORTALITY_MODEL_PATH = MODELS_DIR / "mortality_rf.pkl"
-MORTALITY_BASELINE_MODEL_PATH = MODELS_DIR / "mortality_baseline.pkl"
-MORTALITY_XGB_MODEL_PATH = MODELS_DIR / "mortality_xgb.pkl"
-MORTALITY_SCALER_PATH = MODELS_DIR / "mortality_scaler.pkl"
-LOS_MODEL_PATH = MODELS_DIR / "los_rf.pkl"
-FEATURE_NAMES_PATH = MODELS_DIR / "feature_names.pkl"
-POSTGRES_EARLY_MODEL_PATH = MODELS_DIR / "mortality_postgres_rf_early.pkl"
-POSTGRES_EARLY_IMPUTER_PATH = MODELS_DIR / "mortality_postgres_imputer_early.pkl"
-POSTGRES_EARLY_FEATURE_NAMES_PATH = MODELS_DIR / "feature_names_postgres_early.pkl"
-MODEL_METRICS_PATH = ARTIFACTS_DIR / "model_metrics.json"
 
 NURSE_TARGETS = {
     "glasgow coma score": "gcs",

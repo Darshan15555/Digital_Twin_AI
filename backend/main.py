@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from backend.dependencies import load_model
 from backend.routers import analytics, clinical, patients, predictions, system
 from config.settings import settings
 
@@ -29,14 +28,6 @@ async def lifespan(app: FastAPI):
     log.info("=" * 50)
     log.info("  ICU Analytics Backend Starting")
     log.info("  Database URL: %s", settings.DATABASE_URL)
-    log.info("  Models dir: %s", settings.MODELS_DIR)
-    for model_path in [settings.MORTALITY_MODEL_PATH, settings.LOS_MODEL_PATH, settings.MORTALITY_FEATURES_PATH, settings.EARLY_MORTALITY_MODEL_PATH]:
-        resolved = settings.resolve_path(model_path)
-        if resolved.exists():
-            load_model(model_path)
-            log.info("  ✓ Model loaded: %s", model_path)
-        else:
-            log.info("  ℹ Model not found (OK): %s", model_path)
     log.info("  Backend ready.")
     log.info("=" * 50)
     yield
@@ -56,8 +47,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(system.router)
 app.include_router(patients.router)
 app.include_router(clinical.router)
-app.include_router(predictions.router)
 app.include_router(analytics.router)
+app.include_router(predictions.router)
 
 
 @app.get("/")
@@ -70,7 +61,6 @@ def health():
     return {
         "status": "healthy",
         "database": settings.DATABASE_URL,
-        "models": {"mortality": settings.resolve_path(settings.MORTALITY_MODEL_PATH).exists(), "los": settings.resolve_path(settings.LOS_MODEL_PATH).exists(), "early_mortality": settings.resolve_path(settings.EARLY_MORTALITY_MODEL_PATH).exists()},
     }
 
 

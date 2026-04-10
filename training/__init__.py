@@ -1,1 +1,1 @@
-"""Training utilities for PostgreSQL-backed ICU ML datasets."""
+"""Time-series dataset builder package."""

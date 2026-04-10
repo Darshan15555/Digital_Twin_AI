@@ -50,18 +50,26 @@ def save_cache(name: str, df: pd.DataFrame) -> pd.DataFrame:
 
 
 def source_path(key: str) -> Path:
-    return EICU_RAW_PATH / FILE_NAMES[key]
+    configured = EICU_RAW_PATH / FILE_NAMES[key]
+    if configured.exists():
+        return configured
+    if configured.suffix == ".gz":
+        csv_fallback = configured.with_suffix("")
+        if csv_fallback.exists():
+            return csv_fallback
+    return configured
 
 
 def _csv_columns(key: str) -> list[str]:
     filepath = source_path(key)
     if not filepath.exists():
         raise FileNotFoundError(f"Missing source file: {filepath}")
-    return pd.read_csv(filepath, compression="gzip", nrows=0).columns.tolist()
+    compression = "gzip" if filepath.suffix == ".gz" else None
+    return pd.read_csv(filepath, compression=compression, nrows=0).columns.tolist()
 
 
 def validate_source_data() -> list[str]:
-    missing = [filename for filename in FILE_NAMES.values() if not (EICU_RAW_PATH / filename).exists()]
+    missing = [filename for key, filename in FILE_NAMES.items() if not source_path(key).exists()]
     return missing
 
 
@@ -83,7 +91,7 @@ def _read_csv_in_chunks(
 
     read_csv_kwargs = {
         "filepath_or_buffer": filepath,
-        "compression": "gzip",
+        "compression": "gzip" if filepath.suffix == ".gz" else None,
         "chunksize": chunk_size or CHUNK_SIZE,
         "usecols": usecols,
         "engine": engine,
@@ -133,11 +141,12 @@ def _read_gzip_dict_chunks(
     if not filepath.exists():
         raise FileNotFoundError(f"Missing source file: {filepath}")
 
-    log.info("Streaming %s with gzip/csv fallback", filepath.name)
+    log.info("Streaming %s", filepath.name)
     chunks: list[pd.DataFrame] = []
     buffer: list[dict[str, str]] = []
 
-    with gzip.open(filepath, mode="rt", newline="", encoding="utf-8", errors="ignore") as handle:
+    open_fn = gzip.open if filepath.suffix == ".gz" else open
+    with open_fn(filepath, mode="rt", newline="", encoding="utf-8", errors="ignore") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             return pd.DataFrame(columns=usecols)
@@ -500,9 +509,28 @@ def load_nurse_charting(force: bool = False) -> pd.DataFrame:
         chunk.loc[pain_mask, "metric_value"] = chunk.loc[pain_mask, "metric_value"].where(
             chunk.loc[pain_mask, "metric_value"].between(0, 10)
         )
-        return chunk.dropna(subset=["metric_value"])
+        result = chunk.dropna(subset=["metric_value"])[
+            [
+                "patientunitstayid",
+                "nursingchartoffset",
+                "offset_hours",
+                "metric_name",
+                "metric_value",
+            ]
+        ]
+        return result
 
     df = _read_csv_in_chunks("nurse_charting", usecols, transform)
+    if df.empty:
+        df = pd.DataFrame(
+            columns=[
+                "patientunitstayid",
+                "nursingchartoffset",
+                "offset_hours",
+                "metric_name",
+                "metric_value",
+            ]
+        )
     return save_cache("nurse_charting", df)
 
 
@@ -536,27 +564,42 @@ def load_respiratory_care(force: bool = False) -> pd.DataFrame:
     if has_cache("respiratory_care") and not force:
         return load_cached("respiratory_care")
 
-    usecols = [
-        "patientunitstayid",
-        "respcarestatusoffset",
-        "priorventday1",
-        "priorventday2",
-        "airwaytype",
-        "airwaysize",
-        "apneainterval",
-        "peep",
-        "fio2",
-    ]
+    available_cols = set(_csv_columns("respiratory_care"))
+    column_aliases = {
+        "patientunitstayid": ["patientunitstayid"],
+        "respcarestatusoffset": ["respcarestatusoffset"],
+        "priorventday1": ["priorventday1", "priorventstartoffset"],
+        "priorventday2": ["priorventday2", "priorventendoffset"],
+        "airwaytype": ["airwaytype"],
+        "airwaysize": ["airwaysize"],
+        "apneainterval": ["apneainterval", "setapneainterval"],
+        "peep": ["peep", "peeplimit"],
+        "fio2": ["fio2", "setapneafio2"],
+    }
+    selected_columns: dict[str, str] = {}
+    for target, candidates in column_aliases.items():
+        source = next((name for name in candidates if name in available_cols), None)
+        if source is not None:
+            selected_columns[target] = source
+
+    usecols = list(dict.fromkeys(selected_columns.values()))
 
     def transform(chunk: pd.DataFrame) -> pd.DataFrame:
         chunk = chunk.copy()
+        for target, source in selected_columns.items():
+            if target != source and source in chunk.columns:
+                chunk[target] = chunk[source]
+        for target in column_aliases:
+            if target not in chunk.columns:
+                chunk[target] = np.nan
+
         chunk["patientunitstayid"] = _to_numeric(chunk["patientunitstayid"])
         chunk = chunk.dropna(subset=["patientunitstayid"])
         chunk["patientunitstayid"] = chunk["patientunitstayid"].astype(int)
         chunk["respcarestatusoffset"] = _to_numeric(chunk["respcarestatusoffset"])
         chunk["offset_hours"] = chunk["respcarestatusoffset"] / 60.0
-        chunk["priorventday1"] = chunk["priorventday1"].fillna("").astype(str).str.lower().isin(["1", "true", "yes"]).astype(int)
-        chunk["priorventday2"] = chunk["priorventday2"].fillna("").astype(str).str.lower().isin(["1", "true", "yes"]).astype(int)
+        chunk["priorventday1"] = _to_numeric(chunk["priorventday1"]).fillna(0).gt(0).astype(int)
+        chunk["priorventday2"] = _to_numeric(chunk["priorventday2"]).fillna(0).gt(0).astype(int)
         chunk["airwaytype"] = chunk["airwaytype"].replace("", np.nan)
         chunk["airwaysize"] = _to_numeric(chunk["airwaysize"])
         chunk["apneainterval"] = _to_numeric(chunk["apneainterval"])
@@ -565,7 +608,21 @@ def load_respiratory_care(force: bool = False) -> pd.DataFrame:
         fio2 = np.where(fio2 > 1, fio2 / 100.0, fio2)
         chunk["fio2"] = pd.Series(fio2, index=chunk.index).where(pd.Series(fio2, index=chunk.index).between(0.21, 1.0))
         chunk["on_ventilator"] = chunk["airwaytype"].notna().astype(int)
-        return chunk
+        return chunk[
+            [
+                "patientunitstayid",
+                "respcarestatusoffset",
+                "offset_hours",
+                "priorventday1",
+                "priorventday2",
+                "airwaytype",
+                "airwaysize",
+                "apneainterval",
+                "peep",
+                "fio2",
+                "on_ventilator",
+            ]
+        ]
 
     df = _read_csv_in_chunks("respiratory_care", usecols, transform)
     return save_cache("respiratory_care", df)
@@ -586,7 +643,7 @@ def load_past_history(force: bool = False) -> pd.DataFrame:
         chunk["history_lower"] = chunk["pasthistoryvalue"].str.lower()
         rows = []
         for key, column in COMORBIDITY_MAP.items():
-            subset = chunk[chunk["history_lower"].str.contains(key, na=False)][["patientunitstayid"]].copy()
+            subset = chunk[chunk["history_lower"].str.contains(key, na=False, regex=False)][["patientunitstayid"]].copy()
             if subset.empty:
                 continue
             subset[column] = 1

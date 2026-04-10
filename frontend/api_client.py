@@ -31,6 +31,22 @@ def _request(path: str, params: dict | None = None) -> Any:
         return None
 
 
+def _post(path: str, payload: dict | list) -> Any:
+    try:
+        response = requests.post(f"{BASE_URL}{path}", json=payload, timeout=TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.ConnectionError:
+        _warn("API offline: unable to connect to backend")
+        return None
+    except requests.exceptions.Timeout:
+        _warn("API timeout: backend took too long to respond")
+        return None
+    except requests.exceptions.RequestException as exc:
+        _warn(f"API request failed: {exc}")
+        return None
+
+
 @st.cache_data(ttl=120)
 def fetch_stats() -> dict | None:
     return _request("/stats")
@@ -117,34 +133,6 @@ def fetch_comorbidities(pid: int) -> dict | None:
     return _request(f"/patients/{pid}/comorbidities")
 
 
-@st.cache_data(ttl=300)
-def fetch_predict_mortality(pid: int) -> dict | None:
-    return _request(f"/patients/{pid}/predict/mortality")
-
-
-@st.cache_data(ttl=300)
-def fetch_predict_early_mortality(pid: int) -> dict | None:
-    return _request(f"/patients/{pid}/predict/early-mortality")
-
-
-@st.cache_data(ttl=300)
-def fetch_predict_los(pid: int) -> dict | None:
-    return _request(f"/patients/{pid}/predict/los")
-
-
-@st.cache_data(ttl=300)
-def fetch_predict_sepsis(pid: int) -> dict | None:
-    return _request(f"/patients/{pid}/predict/sepsis")
-
-
-@st.cache_data(ttl=300)
-def fetch_digital_twin(pid: int, steps: int = 12, fio2_delta: float = 0.0, vasopressor_delta: float = 0.0) -> dict | None:
-    return _request(
-        f"/patients/{pid}/digital-twin",
-        {"steps": steps, "fio2_delta": fio2_delta, "vasopressor_delta": vasopressor_delta},
-    )
-
-
 @st.cache_data(ttl=120)
 def fetch_analytics_units() -> list | None:
     return _request("/analytics/unit-breakdown")
@@ -173,3 +161,30 @@ def fetch_analytics_ventilator() -> list | None:
 @st.cache_data(ttl=120)
 def fetch_analytics_fluid() -> list | None:
     return _request("/analytics/fluid-balance")
+
+
+@st.cache_data(ttl=120)
+def fetch_model_info() -> dict | None:
+    return _request("/predictions/model-info")
+
+
+def predict_mortality(patient_data: dict, threshold_type: str = "max_f1") -> dict | None:
+    return _post("/predictions/mortality", {"patient_data": patient_data, "threshold_type": threshold_type})
+
+
+def predict_deterioration(patient_data: dict, window_id: int, threshold_type: str = "max_f1") -> dict | None:
+    return _post(
+        "/predictions/deterioration",
+        {"patient_data": patient_data, "window_id": window_id, "threshold_type": threshold_type},
+    )
+
+
+def predict_batch(patient_windows: list[dict]) -> dict | None:
+    return _post("/predictions/batch", patient_windows)
+
+
+def predict_recent_patient(patient_id: int, hours_back: int = 8, threshold_type: str = "max_f1") -> dict | None:
+    return _request(
+        f"/predictions/patients/{patient_id}/recent",
+        {"hours_back": hours_back, "threshold_type": threshold_type},
+    )

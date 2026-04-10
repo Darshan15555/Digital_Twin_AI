@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import logging
-import pickle
 import sqlite3
-from functools import lru_cache
-from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -67,48 +64,6 @@ def execute_sql(sql: str, params=()) -> bool:
         return False
     finally:
         conn.close()
-
-
-@lru_cache(maxsize=8)
-def load_model(model_path: str):
-    path = settings.resolve_path(model_path)
-    if not path.exists():
-        log.warning("Model not found: %s", path)
-        return None
-    try:
-        with open(path, "rb") as handle:
-            return pickle.load(handle)
-    except Exception as exc:
-        log.error("Failed to load model %s: %s", path, exc, exc_info=True)
-        return None
-
-
-def get_mortality_model():
-    return load_model(settings.MORTALITY_MODEL_PATH)
-
-
-def get_los_model():
-    return load_model(settings.LOS_MODEL_PATH)
-
-
-def get_mortality_features():
-    return load_model(settings.MORTALITY_FEATURES_PATH)
-
-
-def get_mortality_scaler():
-    return load_model(settings.MORTALITY_SCALER_PATH)
-
-
-def get_early_mortality_model():
-    return load_model(settings.EARLY_MORTALITY_MODEL_PATH)
-
-
-def get_early_mortality_features():
-    return load_model(settings.EARLY_MORTALITY_FEATURES_PATH)
-
-
-def get_early_mortality_imputer():
-    return load_model(settings.EARLY_MORTALITY_IMPUTER_PATH)
 
 
 def table_exists(table_name: str, schema: str | None = None) -> bool:

@@ -3,9 +3,58 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from frontend.api_client import fetch_comorbidities, fetch_diagnosis, fetch_fluid_balance, fetch_labs, fetch_medications, fetch_patient, fetch_predict_early_mortality, fetch_predict_los, fetch_predict_sepsis, fetch_treatments, fetch_ventilation, fetch_vitals
-from frontend.components.cards import alert_banner, comorbidity_tags, patient_header_card, risk_badge, vital_status_dot
-from frontend.components.charts import feature_importance_chart, fluid_balance_chart, labs_chart, los_gauge, risk_gauge, sepsis_radar_chart, vitals_multiplot
+from frontend.api_client import (
+    fetch_comorbidities,
+    fetch_diagnosis,
+    fetch_fluid_balance,
+    fetch_labs,
+    fetch_medications,
+    fetch_model_info,
+    fetch_patient,
+    fetch_treatments,
+    fetch_ventilation,
+    fetch_vitals,
+    predict_recent_patient,
+    predict_deterioration,
+    predict_mortality,
+)
+from frontend.components.cards import comorbidity_tags, patient_header_card, risk_badge, vital_status_dot
+from frontend.components.charts import fluid_balance_chart, labs_chart, vitals_multiplot
+
+
+def _build_prediction_payload(patient: dict) -> dict:
+    return {
+        "age": patient.get("age"),
+        "apache_score": patient.get("apache_score", patient.get("apachescore")),
+        "apache_diagnosis": patient.get("apache_diagnosis", patient.get("apacheadmissiondx")),
+        "hr_mean": patient.get("hr_mean"),
+        "sao2_mean": patient.get("sao2_mean"),
+        "sbp_mean": patient.get("sbp_mean"),
+        "resp_mean": patient.get("resp_mean"),
+        "temp_mean": patient.get("temp_mean"),
+        "lactate_value": patient.get("lactate_value"),
+        "creatinine_value": patient.get("creatinine_value"),
+        "gcs_total": patient.get("gcs_total"),
+        "vasopressor_active": patient.get("vasopressor_active", patient.get("on_vasopressor", 0)),
+        "ventilator_active": patient.get("ventilator_active", patient.get("on_ventilator", 0)),
+        "window_id": patient.get("window_id", 0),
+    }
+
+
+def _prediction_metric(label: str, score: float | None, status: str | None, note: str) -> None:
+    pretty_score = "N/A" if score is None else f"{score:.3f}"
+    badge = risk_badge(status or "LOW") if status else '<span class="risk-badge risk-low">UNKNOWN</span>'
+    st.markdown(
+        f"""
+        <div class="metric-card">
+          <div class="metric-label">{label}</div>
+          <div class="metric-value">{pretty_score}</div>
+          <div class="metric-subtext">{note}</div>
+          <div style="margin-top:10px;">{badge}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_page() -> None:
@@ -25,18 +74,136 @@ def render_page() -> None:
         return
 
     st.markdown(patient_header_card(patient), unsafe_allow_html=True)
-    early = fetch_predict_early_mortality(patient_id) or {}
-    if (patient.get("qsofa_score") or 0) >= 2:
-        st.markdown(alert_banner("Sepsis Risk: qSOFA >= 2", "critical"), unsafe_allow_html=True)
-    if early.get("risk_score", 0) >= 0.7:
-        st.markdown(alert_banner("High early mortality risk", "critical"), unsafe_allow_html=True)
-    if patient.get("on_vasopressor"):
-        st.markdown(alert_banner("Patient on vasopressor support", "warning"), unsafe_allow_html=True)
-
+    model_info = fetch_model_info() or {}
+    prediction_payload = _build_prediction_payload(patient)
     vitals_payload = fetch_vitals(patient_id) or {}
     periodic = pd.DataFrame(vitals_payload.get("periodic", []))
     if not periodic.empty:
-        periodic["offset_hours"] = periodic.get("offset_hours", periodic["observationoffset"] / 60.0)
+        if "offset_hours" in periodic.columns:
+            periodic["offset_hours"] = pd.to_numeric(periodic["offset_hours"], errors="coerce")
+        elif "observationoffset" in periodic.columns:
+            periodic["offset_hours"] = pd.to_numeric(periodic["observationoffset"], errors="coerce") / 60.0
+        else:
+            periodic["offset_hours"] = pd.NA
+        latest_row = periodic.iloc[-1].to_dict()
+        prediction_payload.update(
+            {
+                "hr_mean": latest_row.get("heartrate", prediction_payload.get("hr_mean")),
+                "sao2_mean": latest_row.get("sao2", prediction_payload.get("sao2_mean")),
+                "resp_mean": latest_row.get("respiration", prediction_payload.get("resp_mean")),
+                "sbp_mean": latest_row.get("systemicsystolic", prediction_payload.get("sbp_mean")),
+                "temp_mean": latest_row.get("temperature", prediction_payload.get("temp_mean")),
+                "cvp_mean": latest_row.get("cvp", prediction_payload.get("cvp_mean")),
+            }
+        )
+
+    labs_payload = fetch_labs(patient_id) or {}
+    labs = pd.DataFrame(labs_payload.get("labs", []))
+    if not labs.empty and {"labname", "labresult"}.issubset(labs.columns):
+        latest_labs = (
+            labs.dropna(subset=["labname"])
+            .sort_values(by=[c for c in ["labresultoffset"] if c in labs.columns] or ["labname"])
+            .groupby("labname", as_index=False)
+            .tail(1)
+        )
+        lab_map = {
+            "lactate": "lactate_value",
+            "creatinine": "creatinine_value",
+            "glucose": "glucose_value",
+            "sodium": "sodium_value",
+            "potassium": "potassium_value",
+            "bicarbonate": "bicarbonate_value",
+            "hemoglobin": "hemoglobin_value",
+            "wbc": "wbc_value",
+        }
+        for _, row in latest_labs.iterrows():
+            name = str(row.get("labname", "")).strip().lower()
+            for token, feature_name in lab_map.items():
+                if token in name:
+                    prediction_payload[feature_name] = row.get("labresult", prediction_payload.get(feature_name))
+                    break
+
+    st.markdown('<div class="section-header">ML Predictions</div>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+    threshold_type = c1.selectbox(
+        "Threshold",
+        ["max_f1", "balanced", "max_sensitivity_90", "max_specificity_90", "default"],
+        index=0,
+        key=f"prediction_threshold_{patient_id}",
+    )
+    hours_back = c2.selectbox("Recent Horizon", [4, 6, 8, 12], index=2, key=f"prediction_hours_{patient_id}")
+    window_id = c3.selectbox(
+        "Window",
+        [0, 1, 2, 3, 4, 5],
+        index=int(prediction_payload.get("window_id", 0) or 0),
+        key=f"prediction_window_{patient_id}",
+    )
+    run_prediction = c4.button("Snapshot Predict", key=f"run_prediction_{patient_id}", use_container_width=True)
+    run_recent_prediction = st.button("Recent TS Predict", key=f"run_recent_prediction_{patient_id}", use_container_width=True)
+    st.caption(
+        f"Loaded models: mortality={'yes' if model_info.get('mortality_model') else 'no'}, "
+        f"deterioration={'yes' if model_info.get('deterioration_model') else 'no'}"
+    )
+
+    if run_prediction:
+        mortality_result = predict_mortality(prediction_payload, threshold_type=threshold_type) or {}
+        deterioration_result = predict_deterioration(prediction_payload, window_id=window_id, threshold_type=threshold_type) or {}
+        r1, r2 = st.columns(2)
+        with r1:
+            _prediction_metric(
+                "Mortality Risk",
+                mortality_result.get("risk_score"),
+                mortality_result.get("risk_label"),
+                mortality_result.get("interpretation", "Prediction unavailable"),
+            )
+        with r2:
+            deterioration_label = "HIGH" if deterioration_result.get("prediction") == 1 else "LOW"
+            if deterioration_result.get("error"):
+                deterioration_label = "UNKNOWN"
+            _prediction_metric(
+                "Deterioration Risk",
+                deterioration_result.get("deterioration_risk"),
+                deterioration_label,
+                deterioration_result.get("error", f"Threshold: {deterioration_result.get('threshold_type', threshold_type)}"),
+            )
+        if mortality_result.get("top_features"):
+            st.write("Top mortality drivers")
+            st.dataframe(
+                pd.DataFrame(mortality_result["top_features"], columns=["feature", "importance"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    if run_recent_prediction:
+        recent_result = predict_recent_patient(patient_id, hours_back=hours_back, threshold_type=threshold_type) or {}
+        if recent_result.get("error"):
+            st.warning(recent_result["error"])
+        else:
+            st.caption(
+                f"Built from last {recent_result.get('hours_back', hours_back)} hours "
+                f"across {recent_result.get('window_count', 1)} window(s)."
+            )
+            rr1, rr2 = st.columns(2)
+            mortality_recent = recent_result.get("mortality", {})
+            deterioration_recent = recent_result.get("deterioration", {})
+            with rr1:
+                _prediction_metric(
+                    "Recent-History Mortality",
+                    mortality_recent.get("risk_score"),
+                    mortality_recent.get("risk_label"),
+                    mortality_recent.get("interpretation", "Prediction unavailable"),
+                )
+            with rr2:
+                det_label = "HIGH" if deterioration_recent.get("prediction") == 1 else "LOW"
+                if deterioration_recent.get("error"):
+                    det_label = "UNKNOWN"
+                _prediction_metric(
+                    "Recent-History Deterioration",
+                    deterioration_recent.get("deterioration_risk"),
+                    det_label,
+                    deterioration_recent.get("error", f"Current window: {recent_result.get('current_window_id', 0)}"),
+                )
+
     specs = [
         ("heartrate", "Heart Rate", (40, 55, 110, 150)),
         ("sao2", "SpO2", (90, 92, 100, 100)),
@@ -63,7 +230,7 @@ def render_page() -> None:
                 unsafe_allow_html=True,
             )
 
-    tabs = st.tabs(["Vitals", "Labs", "Diagnosis & Treatment", "Medications", "Fluid Balance", "Ventilation", "History & Comorbidities", "Predictions"])
+    tabs = st.tabs(["Vitals", "Labs", "Diagnosis & Treatment", "Medications", "Fluid Balance", "Ventilation", "History & Comorbidities"])
 
     with tabs[0]:
         if periodic.empty:
@@ -74,7 +241,6 @@ def render_page() -> None:
             st.dataframe(summary, use_container_width=True)
 
     with tabs[1]:
-        labs = pd.DataFrame((fetch_labs(patient_id) or {}).get("labs", []))
         if labs.empty:
             st.info("No labs available.")
         else:
@@ -127,30 +293,4 @@ def render_page() -> None:
         st.markdown(comorbidity_tags(comorb), unsafe_allow_html=True)
         st.json(comorb)
 
-    with tabs[7]:
-        result = fetch_predict_early_mortality(patient_id) or {}
-        if result:
-            left, right = st.columns([2, 3])
-            with left:
-                st.plotly_chart(risk_gauge(result["risk_score"]), use_container_width=True)
-            with right:
-                st.markdown(risk_badge(result["risk_label"]), unsafe_allow_html=True)
-                st.write(f"Risk Score: {result['risk_score']:.3f} ({result['risk_score'] * 100:.1f}%)")
-                st.write(f"Prediction: {'Alert triggered' if result['prediction'] else 'No alert'}")
-                st.write(f"Action: {result['recommended_action']}")
-                st.plotly_chart(feature_importance_chart(result["top_features"]), use_container_width=True)
-        los_result = fetch_predict_los(patient_id) or {}
-        if los_result:
-            st.plotly_chart(los_gauge(los_result["predicted_icu_los_hours"]), use_container_width=True)
-        sepsis = fetch_predict_sepsis(patient_id) or {}
-        if sepsis:
-            st.metric("qSOFA Score", int(sepsis.get("qsofa_score", 0)))
-            criteria = {
-                "resp_rate_score": 1 if sepsis.get("qsofa_score", 0) >= 1 else 0,
-                "sbp_score": 1 if sepsis.get("qsofa_score", 0) >= 1 else 0,
-                "gcs_score": 1 if sepsis.get("qsofa_score", 0) >= 1 else 0,
-                "lactate_score": 1 if sepsis.get("sofa_approx_score", 0) >= 4 else 0,
-                "sofa_score": sepsis.get("sofa_approx_score", 0),
-            }
-            st.plotly_chart(sepsis_radar_chart(criteria), use_container_width=True)
 
