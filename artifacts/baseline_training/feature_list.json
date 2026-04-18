@@ -1,0 +1,10 @@
+{
+  "features": [
+    "hr",
+    "spo2",
+    "bp_sys",
+    "bp_dia",
+    "bp_mean"
+  ],
+  "count": 5
+}

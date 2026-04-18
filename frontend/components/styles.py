@@ -37,6 +37,7 @@ def inject_styles() -> None:
         .sidebar-subtitle { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; }
         .status-dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px; animation:pulse 1.8s infinite; }
         .status-online { background: var(--accent-green); box-shadow: 0 0 10px rgba(0,229,160,0.6); }
+        .status-partial { background: var(--accent-amber); box-shadow: 0 0 10px rgba(255,184,48,0.6); }
         .status-offline { background: var(--accent-red); box-shadow: 0 0 10px rgba(255,69,96,0.6); }
         @keyframes pulse { 0% { transform: scale(1); opacity: 0.8; } 50% { transform: scale(1.2); opacity: 1; } 100% { transform: scale(1); opacity: 0.8; } }
         .metric-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px 12px 16px; position: relative; overflow: hidden; min-height: 122px; transition: transform 0.2s ease; }

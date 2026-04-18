@@ -11,7 +11,7 @@ ARTIFACTS_DIR = DATA_DIR / "artifacts"
 
 load_dotenv(BASE_DIR / ".env")
 
-EICU_RAW_PATH = Path(os.getenv("EICU_RAW_PATH", r"D:\physionet-data\eicu"))
+EICU_RAW_PATH = Path(os.getenv("EICU_RAW_PATH", "data/parquet"))
 SQLITE_DB_PATH = DATA_DIR / "icu_data.db"
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "50000"))

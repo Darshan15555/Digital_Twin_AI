@@ -11,7 +11,7 @@ class Settings:
         base_dir = Path(__file__).resolve().parent.parent
         load_dotenv(base_dir / ".env")
         self.BASE_DIR = base_dir
-        self.EICU_RAW_PATH = os.getenv("EICU_RAW_PATH", r"D:\physionet-data\eicu\eicu-collaborative-research-database-2.0")
+        self.EICU_RAW_PATH = os.getenv("EICU_RAW_PATH", "data/parquet")
         self.DATA_DIR = os.getenv("DATA_DIR", "data")
         self.PARQUET_DIR = os.getenv("PARQUET_DIR", "data/parquet")
         self.SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "data/icu_data.db")

@@ -1,0 +1,87 @@
+{
+  "best_model": "lightgbm",
+  "split_report": {
+    "train_rows": 7268,
+    "val_rows": 1541,
+    "test_rows": 1556,
+    "train_patients": 4183,
+    "val_patients": 896,
+    "test_patients": 897,
+    "overlap_train_val": 0,
+    "overlap_train_test": 0,
+    "overlap_val_test": 0,
+    "target_rate_train": 0.06535498073747936,
+    "target_rate_val": 0.06229720960415315,
+    "target_rate_test": 0.07583547557840617
+  },
+  "reports": {
+    "lightgbm": {
+      "validation": {
+        "auroc": 0.7012110726643599,
+        "default_0_5": {
+          "threshold": 0.5,
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        "best_f1": {
+          "threshold": 0.1,
+          "f1": 0.20408163265306123,
+          "precision": 0.12415349887133183,
+          "recall": 0.5729166666666666
+        },
+        "best_f1_value": 0.20408163265306123
+      },
+      "test": {
+        "auroc": 0.6708941326229932,
+        "default_0_5": {
+          "threshold": 0.5,
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0
+        },
+        "best_f1_threshold_from_val": {
+          "threshold": 0.1,
+          "f1": 0.2309124767225326,
+          "precision": 0.14797136038186157,
+          "recall": 0.5254237288135594
+        }
+      }
+    },
+    "xgboost": {
+      "validation": {
+        "auroc": 0.6527465397923875,
+        "default_0_5": {
+          "threshold": 0.5,
+          "f1": 0.1352112676056338,
+          "precision": 0.09266409266409266,
+          "recall": 0.25
+        },
+        "best_f1": {
+          "threshold": 0.6400000000000001,
+          "f1": 0.18779342723004694,
+          "precision": 0.17094017094017094,
+          "recall": 0.20833333333333334
+        },
+        "best_f1_value": 0.18779342723004694
+      },
+      "test": {
+        "auroc": 0.646289573560265,
+        "default_0_5": {
+          "threshold": 0.5,
+          "f1": 0.21910112359550563,
+          "precision": 0.1638655462184874,
+          "recall": 0.3305084745762712
+        },
+        "best_f1_threshold_from_val": {
+          "threshold": 0.6400000000000001,
+          "f1": 0.19047619047619047,
+          "precision": 0.19469026548672566,
+          "recall": 0.1864406779661017
+        }
+      }
+    }
+  },
+  "selected_threshold": 0.1,
+  "dataset_path": "data\\parquet\\minimal_hr_spo2_bp.parquet"
+}

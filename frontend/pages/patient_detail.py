@@ -9,52 +9,14 @@ from frontend.api_client import (
     fetch_fluid_balance,
     fetch_labs,
     fetch_medications,
-    fetch_model_info,
     fetch_patient,
     fetch_treatments,
     fetch_ventilation,
     fetch_vitals,
-    predict_recent_patient,
-    predict_deterioration,
-    predict_mortality,
+    predict_vitals,
 )
-from frontend.components.cards import comorbidity_tags, patient_header_card, risk_badge, vital_status_dot
+from frontend.components.cards import comorbidity_tags, patient_header_card, vital_status_dot
 from frontend.components.charts import fluid_balance_chart, labs_chart, vitals_multiplot
-
-
-def _build_prediction_payload(patient: dict) -> dict:
-    return {
-        "age": patient.get("age"),
-        "apache_score": patient.get("apache_score", patient.get("apachescore")),
-        "apache_diagnosis": patient.get("apache_diagnosis", patient.get("apacheadmissiondx")),
-        "hr_mean": patient.get("hr_mean"),
-        "sao2_mean": patient.get("sao2_mean"),
-        "sbp_mean": patient.get("sbp_mean"),
-        "resp_mean": patient.get("resp_mean"),
-        "temp_mean": patient.get("temp_mean"),
-        "lactate_value": patient.get("lactate_value"),
-        "creatinine_value": patient.get("creatinine_value"),
-        "gcs_total": patient.get("gcs_total"),
-        "vasopressor_active": patient.get("vasopressor_active", patient.get("on_vasopressor", 0)),
-        "ventilator_active": patient.get("ventilator_active", patient.get("on_ventilator", 0)),
-        "window_id": patient.get("window_id", 0),
-    }
-
-
-def _prediction_metric(label: str, score: float | None, status: str | None, note: str) -> None:
-    pretty_score = "N/A" if score is None else f"{score:.3f}"
-    badge = risk_badge(status or "LOW") if status else '<span class="risk-badge risk-low">UNKNOWN</span>'
-    st.markdown(
-        f"""
-        <div class="metric-card">
-          <div class="metric-label">{label}</div>
-          <div class="metric-value">{pretty_score}</div>
-          <div class="metric-subtext">{note}</div>
-          <div style="margin-top:10px;">{badge}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def render_page() -> None:
@@ -74,8 +36,6 @@ def render_page() -> None:
         return
 
     st.markdown(patient_header_card(patient), unsafe_allow_html=True)
-    model_info = fetch_model_info() or {}
-    prediction_payload = _build_prediction_payload(patient)
     vitals_payload = fetch_vitals(patient_id) or {}
     periodic = pd.DataFrame(vitals_payload.get("periodic", []))
     if not periodic.empty:
@@ -85,124 +45,103 @@ def render_page() -> None:
             periodic["offset_hours"] = pd.to_numeric(periodic["observationoffset"], errors="coerce") / 60.0
         else:
             periodic["offset_hours"] = pd.NA
-        latest_row = periodic.iloc[-1].to_dict()
-        prediction_payload.update(
-            {
-                "hr_mean": latest_row.get("heartrate", prediction_payload.get("hr_mean")),
-                "sao2_mean": latest_row.get("sao2", prediction_payload.get("sao2_mean")),
-                "resp_mean": latest_row.get("respiration", prediction_payload.get("resp_mean")),
-                "sbp_mean": latest_row.get("systemicsystolic", prediction_payload.get("sbp_mean")),
-                "temp_mean": latest_row.get("temperature", prediction_payload.get("temp_mean")),
-                "cvp_mean": latest_row.get("cvp", prediction_payload.get("cvp_mean")),
-            }
-        )
 
     labs_payload = fetch_labs(patient_id) or {}
     labs = pd.DataFrame(labs_payload.get("labs", []))
-    if not labs.empty and {"labname", "labresult"}.issubset(labs.columns):
-        latest_labs = (
-            labs.dropna(subset=["labname"])
-            .sort_values(by=[c for c in ["labresultoffset"] if c in labs.columns] or ["labname"])
-            .groupby("labname", as_index=False)
-            .tail(1)
-        )
-        lab_map = {
-            "lactate": "lactate_value",
-            "creatinine": "creatinine_value",
-            "glucose": "glucose_value",
-            "sodium": "sodium_value",
-            "potassium": "potassium_value",
-            "bicarbonate": "bicarbonate_value",
-            "hemoglobin": "hemoglobin_value",
-            "wbc": "wbc_value",
-        }
-        for _, row in latest_labs.iterrows():
-            name = str(row.get("labname", "")).strip().lower()
-            for token, feature_name in lab_map.items():
-                if token in name:
-                    prediction_payload[feature_name] = row.get("labresult", prediction_payload.get(feature_name))
-                    break
 
-    st.markdown('<div class="section-header">ML Predictions</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Vital-Signs Prediction</div>', unsafe_allow_html=True)
+    st.caption("Prediction based on vital signs.")
+    in_progress_key = f"patient_prediction_in_progress_{patient_id}"
+    if in_progress_key not in st.session_state:
+        st.session_state[in_progress_key] = False
+    status = st.empty()
+    if st.session_state[in_progress_key]:
+        status.info("Processing...")
+
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-    threshold_type = c1.selectbox(
-        "Threshold",
-        ["max_f1", "balanced", "max_sensitivity_90", "max_specificity_90", "default"],
-        index=0,
-        key=f"prediction_threshold_{patient_id}",
+    hr_value = c1.number_input(
+        "Heart Rate (beats per minute)",
+        min_value=30.0,
+        max_value=220.0,
+        value=None,
+        step=1.0,
+        placeholder="Enter heart rate",
+        key=f"patient_prediction_hr_{patient_id}",
     )
-    hours_back = c2.selectbox("Recent Horizon", [4, 6, 8, 12], index=2, key=f"prediction_hours_{patient_id}")
-    window_id = c3.selectbox(
-        "Window",
-        [0, 1, 2, 3, 4, 5],
-        index=int(prediction_payload.get("window_id", 0) or 0),
-        key=f"prediction_window_{patient_id}",
+    c1.caption("How fast the heart is beating right now.")
+    spo2_value = c2.number_input(
+        "Oxygen Saturation (%)",
+        min_value=70.0,
+        max_value=100.0,
+        value=None,
+        step=1.0,
+        placeholder="Enter oxygen saturation",
+        key=f"patient_prediction_spo2_{patient_id}",
     )
-    run_prediction = c4.button("Snapshot Predict", key=f"run_prediction_{patient_id}", use_container_width=True)
-    run_recent_prediction = st.button("Recent TS Predict", key=f"run_recent_prediction_{patient_id}", use_container_width=True)
-    st.caption(
-        f"Loaded models: mortality={'yes' if model_info.get('mortality_model') else 'no'}, "
-        f"deterioration={'yes' if model_info.get('deterioration_model') else 'no'}"
+    c2.caption("Percentage of oxygen in the blood.")
+    bp_sys_value = c3.number_input(
+        "Blood Pressure (Systolic)",
+        min_value=40.0,
+        max_value=300.0,
+        value=None,
+        step=1.0,
+        placeholder="Enter systolic blood pressure",
+        key=f"patient_prediction_bp_sys_{patient_id}",
+    )
+    c3.caption("Top blood pressure number during heart contraction.")
+    bp_dia_value = c4.number_input(
+        "Blood Pressure (Diastolic)",
+        min_value=20.0,
+        max_value=220.0,
+        value=None,
+        step=1.0,
+        placeholder="Enter diastolic blood pressure",
+        key=f"patient_prediction_bp_dia_{patient_id}",
+    )
+    c4.caption("Bottom blood pressure number between heart beats.")
+    threshold = st.slider("Decision Threshold", min_value=0.0, max_value=1.0, value=0.5, step=0.01, key=f"prediction_threshold_{patient_id}")
+    run_prediction = st.button(
+        "Run Predict",
+        key=f"run_prediction_{patient_id}",
+        use_container_width=True,
+        disabled=st.session_state[in_progress_key],
     )
 
     if run_prediction:
-        mortality_result = predict_mortality(prediction_payload, threshold_type=threshold_type) or {}
-        deterioration_result = predict_deterioration(prediction_payload, window_id=window_id, threshold_type=threshold_type) or {}
-        r1, r2 = st.columns(2)
-        with r1:
-            _prediction_metric(
-                "Mortality Risk",
-                mortality_result.get("risk_score"),
-                mortality_result.get("risk_label"),
-                mortality_result.get("interpretation", "Prediction unavailable"),
-            )
-        with r2:
-            deterioration_label = "HIGH" if deterioration_result.get("prediction") == 1 else "LOW"
-            if deterioration_result.get("error"):
-                deterioration_label = "UNKNOWN"
-            _prediction_metric(
-                "Deterioration Risk",
-                deterioration_result.get("deterioration_risk"),
-                deterioration_label,
-                deterioration_result.get("error", f"Threshold: {deterioration_result.get('threshold_type', threshold_type)}"),
-            )
-        if mortality_result.get("top_features"):
-            st.write("Top mortality drivers")
-            st.dataframe(
-                pd.DataFrame(mortality_result["top_features"], columns=["feature", "importance"]),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    if run_recent_prediction:
-        recent_result = predict_recent_patient(patient_id, hours_back=hours_back, threshold_type=threshold_type) or {}
-        if recent_result.get("error"):
-            st.warning(recent_result["error"])
+        if any(value is None for value in (hr_value, spo2_value, bp_sys_value, bp_dia_value)):
+            st.warning("Please enter all required values")
+            return
+        st.session_state[in_progress_key] = True
+        status.info("Processing...")
+        with st.spinner("Processing..."):
+            result = predict_vitals(
+                hr=float(hr_value),
+                spo2=float(spo2_value),
+                bp_sys=float(bp_sys_value),
+                bp_dia=float(bp_dia_value),
+                threshold=float(threshold),
+            ) or {}
+        st.session_state[in_progress_key] = False
+        if not result:
+            st.warning("Prediction unavailable.")
+            status.empty()
+        elif isinstance(result, dict) and result.get("ok") is False:
+            st.warning(str(result.get("message", "Prediction unavailable.")))
+            status.empty()
         else:
-            st.caption(
-                f"Built from last {recent_result.get('hours_back', hours_back)} hours "
-                f"across {recent_result.get('window_count', 1)} window(s)."
-            )
-            rr1, rr2 = st.columns(2)
-            mortality_recent = recent_result.get("mortality", {})
-            deterioration_recent = recent_result.get("deterioration", {})
-            with rr1:
-                _prediction_metric(
-                    "Recent-History Mortality",
-                    mortality_recent.get("risk_score"),
-                    mortality_recent.get("risk_label"),
-                    mortality_recent.get("interpretation", "Prediction unavailable"),
-                )
-            with rr2:
-                det_label = "HIGH" if deterioration_recent.get("prediction") == 1 else "LOW"
-                if deterioration_recent.get("error"):
-                    det_label = "UNKNOWN"
-                _prediction_metric(
-                    "Recent-History Deterioration",
-                    deterioration_recent.get("deterioration_risk"),
-                    det_label,
-                    deterioration_recent.get("error", f"Current window: {recent_result.get('current_window_id', 0)}"),
-                )
+            status.success("Result ready")
+            prediction_value = int(result.get("prediction", 0))
+            risk_category = "High Risk" if prediction_value == 1 else "Low Risk"
+            probability = float(result.get("probability", 0.0))
+            threshold_used = float(result.get("threshold_used", threshold))
+            model_name = str(result.get("model_name", "N/A"))
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Risk Category", risk_category)
+            m2.metric("Risk Probability", f"{probability * 100:.1f}%")
+            m3.metric("Threshold Used", f"{threshold_used * 100:.1f}%")
+            st.info(f"Risk Probability: {probability * 100:.1f}% (chance of deterioration)")
+            st.caption(f"Model used: {model_name}")
 
     specs = [
         ("heartrate", "Heart Rate", (40, 55, 110, 150)),

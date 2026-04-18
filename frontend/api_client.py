@@ -11,45 +11,127 @@ BASE_URL = f"http://{API_HOST}:{API_PORT}"
 TIMEOUT_SECONDS = 8
 
 
-def _warn(message: str) -> None:
-    st.sidebar.warning(message)
+def _parse_json_response(response: requests.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return None
 
 
-def _request(path: str, params: dict | None = None) -> Any:
+def _sanitize_error_text(text: str | None) -> str:
+    if not text:
+        return ""
+    cleaned = str(text).strip()
+    if "Traceback" in cleaned or "File \"" in cleaned:
+        return ""
+    if len(cleaned) > 280:
+        cleaned = cleaned[:277].rstrip() + "..."
+    return cleaned
+
+
+def _extract_backend_detail(payload: Any) -> str:
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, list):
+            messages: list[str] = []
+            for item in detail[:3]:
+                if isinstance(item, dict):
+                    msg = str(item.get("msg", "")).strip()
+                    loc = item.get("loc", [])
+                    field = str(loc[-1]) if isinstance(loc, list) and loc else ""
+                    if msg and field:
+                        messages.append(f"{field}: {msg}")
+                    elif msg:
+                        messages.append(msg)
+            return "; ".join(messages)
+        if isinstance(detail, str):
+            return detail
+        for key in ("error", "message"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                return value
+    elif isinstance(payload, str):
+        return payload
+    return ""
+
+
+def _build_error_payload(status_code: int | None, detail: str, fallback_message: str) -> dict[str, Any]:
+    safe_detail = _sanitize_error_text(detail)
+    if safe_detail and "Model unavailable" in safe_detail:
+        message = "Prediction service is temporarily unavailable. Please try again shortly."
+    elif status_code in (400, 422):
+        message = safe_detail or "Some input values are invalid. Please review and try again."
+    elif status_code == 404:
+        message = "Requested data was not found."
+    elif status_code is not None and status_code >= 500:
+        message = "Server error occurred. Please try again."
+    else:
+        message = safe_detail or fallback_message
+
+    return {
+        "ok": False,
+        "status_code": status_code,
+        "error": "request_failed",
+        "message": message,
+    }
+
+
+def _request(path: str, params: dict | None = None, *, include_error: bool = False) -> Any:
     try:
         response = requests.get(f"{BASE_URL}{path}", params=params, timeout=TIMEOUT_SECONDS)
-        response.raise_for_status()
-        return response.json()
+        payload = _parse_json_response(response)
+        if response.ok:
+            return payload
+        if not include_error:
+            return None
+        detail = _extract_backend_detail(payload)
+        return _build_error_payload(response.status_code, detail, "Request failed. Please try again.")
     except requests.exceptions.ConnectionError:
-        _warn("API offline: unable to connect to backend")
+        if include_error:
+            return _build_error_payload(None, "", "Cannot connect to server. Please check backend status.")
         return None
     except requests.exceptions.Timeout:
-        _warn("API timeout: backend took too long to respond")
+        if include_error:
+            return _build_error_payload(None, "", "Server is taking too long to respond. Please try again.")
         return None
     except requests.exceptions.RequestException as exc:
-        _warn(f"API request failed: {exc}")
+        if include_error:
+            return _build_error_payload(None, _sanitize_error_text(str(exc)), "Request failed. Please try again.")
         return None
 
 
-def _post(path: str, payload: dict | list) -> Any:
+def _post(path: str, payload: dict | list, *, include_error: bool = False) -> Any:
     try:
         response = requests.post(f"{BASE_URL}{path}", json=payload, timeout=TIMEOUT_SECONDS)
-        response.raise_for_status()
-        return response.json()
+        body = _parse_json_response(response)
+        if response.ok:
+            return body
+        if not include_error:
+            return None
+        detail = _extract_backend_detail(body)
+        return _build_error_payload(response.status_code, detail, "Request failed. Please try again.")
     except requests.exceptions.ConnectionError:
-        _warn("API offline: unable to connect to backend")
+        if include_error:
+            return _build_error_payload(None, "", "Cannot connect to server. Please check backend status.")
         return None
     except requests.exceptions.Timeout:
-        _warn("API timeout: backend took too long to respond")
+        if include_error:
+            return _build_error_payload(None, "", "Server is taking too long to respond. Please try again.")
         return None
     except requests.exceptions.RequestException as exc:
-        _warn(f"API request failed: {exc}")
+        if include_error:
+            return _build_error_payload(None, _sanitize_error_text(str(exc)), "Request failed. Please try again.")
         return None
 
 
 @st.cache_data(ttl=120)
 def fetch_stats() -> dict | None:
     return _request("/stats")
+
+
+@st.cache_data(ttl=15)
+def fetch_system_health() -> dict | None:
+    return _request("/health")
 
 
 @st.cache_data(ttl=30)
@@ -163,28 +245,27 @@ def fetch_analytics_fluid() -> list | None:
     return _request("/analytics/fluid-balance")
 
 
-@st.cache_data(ttl=120)
-def fetch_model_info() -> dict | None:
-    return _request("/predictions/model-info")
+def predict_vitals(
+    *,
+    hr: float,
+    spo2: float,
+    bp_sys: float,
+    bp_dia: float,
+    threshold: float | None = None,
+) -> dict | None:
+    payload: dict[str, Any] = {
+        "hr": float(hr),
+        "spo2": float(spo2),
+        "bp_sys": float(bp_sys),
+        "bp_dia": float(bp_dia),
+    }
+    if threshold is not None:
+        payload["threshold"] = float(threshold)
+    return _post("/predict", payload, include_error=True)
 
 
-def predict_mortality(patient_data: dict, threshold_type: str = "max_f1") -> dict | None:
-    return _post("/predictions/mortality", {"patient_data": patient_data, "threshold_type": threshold_type})
-
-
-def predict_deterioration(patient_data: dict, window_id: int, threshold_type: str = "max_f1") -> dict | None:
-    return _post(
-        "/predictions/deterioration",
-        {"patient_data": patient_data, "window_id": window_id, "threshold_type": threshold_type},
-    )
-
-
-def predict_batch(patient_windows: list[dict]) -> dict | None:
-    return _post("/predictions/batch", patient_windows)
-
-
-def predict_recent_patient(patient_id: int, hours_back: int = 8, threshold_type: str = "max_f1") -> dict | None:
-    return _request(
-        f"/predictions/patients/{patient_id}/recent",
-        {"hours_back": hours_back, "threshold_type": threshold_type},
-    )
+def predict_vitals_batch(items: list[dict[str, float]], threshold: float | None = None) -> dict | None:
+    payload: dict[str, Any] = {"items": items}
+    if threshold is not None:
+        payload["threshold"] = float(threshold)
+    return _post("/predict/batch", payload, include_error=True)

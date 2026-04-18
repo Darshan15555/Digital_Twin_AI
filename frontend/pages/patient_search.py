@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 
@@ -36,7 +36,7 @@ def render_page() -> None:
             df["vaso_label"] = df["on_vasopressor"].map({1: "Yes", 0: "No"}).fillna("No")
         if "on_ventilator" in df.columns:
             df["vent_label"] = df["on_ventilator"].map({1: "Yes", 0: "No"}).fillna("No")
-        cols = [c for c in ["patientunitstayid", "age", "gender", "unittype", "apachescore", "icu_los_hours", "predicted_mortality_risk", "qsofa_score", "vaso_label", "vent_label", "sepsis_risk", "outcome_label"] if c in df.columns]
+        cols = [c for c in ["patientunitstayid", "age", "gender", "unittype", "icu_los_hours", "predicted_mortality_risk", "vaso_label", "vent_label", "sepsis_risk", "outcome_label"] if c in df.columns]
         st.dataframe(df[cols], use_container_width=True, hide_index=True)
 
     prev_col, page_col, next_col = st.columns([1, 2, 1])
@@ -49,7 +49,8 @@ def render_page() -> None:
         st.rerun()
 
     patient_id = st.number_input("Patient quick-select", min_value=0, step=1, key="patient_search_pick")
-    if st.button("View Patient →") and patient_id:
+    if st.button("View Patient â†’") and patient_id:
         st.session_state["selected_patient"] = int(patient_id)
-        st.session_state["page"] = "👤  Patient Detail"
+        st.session_state["page"] = "patient_detail"
         st.rerun()
+

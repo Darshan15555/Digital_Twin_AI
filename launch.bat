@@ -9,7 +9,7 @@ echo  ========================================
 echo.
 
 :MENU
-echo  [1] Setup (first time - loads data + trains model)
+echo  [1] Setup (first time - validates ingestion config)
 echo  [2] Start Backend API
 echo  [3] Start Frontend Dashboard
 echo  [4] Generate Demo Data (no eICU needed)

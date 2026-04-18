@@ -12,7 +12,9 @@ from fastapi.responses import JSONResponse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from backend.routers import analytics, clinical, patients, predictions, system
+from backend.inference import api as inference_api
+from backend.inference.schema import PredictRequest
+from backend.routers import analytics, clinical, patients, system
 from config.settings import settings
 
 logging.basicConfig(
@@ -41,14 +43,14 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     log.error("Unhandled exception on %s: %s", request.url, exc, exc_info=True)
-    return JSONResponse(status_code=200, content={"error": str(exc), "endpoint": str(request.url), "status": "error"})
+    return JSONResponse(status_code=500, content={"error": str(exc), "endpoint": str(request.url), "status": "error"})
 
 
 app.include_router(system.router)
 app.include_router(patients.router)
 app.include_router(clinical.router)
 app.include_router(analytics.router)
-app.include_router(predictions.router)
+app.include_router(inference_api.router)
 
 
 @app.get("/")
@@ -58,8 +60,35 @@ def root():
 
 @app.get("/health")
 def health():
+    model_ready = False
+    prediction_ready = False
+    model_name = "unknown"
+    reason = "API reachable"
+    try:
+        model_info = inference_api.predictor.model_info()
+        model_ready = bool(model_info.get("model_ready"))
+        model_name = str(model_info.get("model_name", "unknown"))
+        if model_ready:
+            probe_payload = PredictRequest(hr=90.0, spo2=97.0, bp_sys=120.0, bp_dia=80.0)
+            probe_result = inference_api.predict(probe_payload)
+            prediction_ready = isinstance(getattr(probe_result, "prediction", None), int)
+            if prediction_ready:
+                reason = "All systems operational"
+            else:
+                reason = "Prediction service is not ready"
+        else:
+            reason = "Model artifact is not ready"
+    except Exception:
+        reason = "Prediction service is not ready"
+
+    status = "online" if prediction_ready else "partial"
     return {
-        "status": "healthy",
+        "status": status,
+        "api_ready": True,
+        "model_ready": model_ready,
+        "prediction_ready": prediction_ready,
+        "model_name": model_name,
+        "reason": reason,
         "database": settings.DATABASE_URL,
     }
 

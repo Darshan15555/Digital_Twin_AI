@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
@@ -20,12 +20,11 @@ def render_page() -> None:
     cards = [
         (f"{int(stats.get('total_patients', 0)):,}", "Total Patients", "Rows available in current app dataset", "cyan"),
         (f"{mortality_pct:.2f}%", "Mortality Rate", "Outcome prevalence", "red" if mortality_pct > 15 else "amber" if mortality_pct > 8 else "green"),
-        (f"{stats.get('avg_age') or '—'}", "Avg Age", "May be unavailable in current backend stats", "cyan"),
-        (f"{(stats.get('avg_apache_score') or 0):.1f}", "Avg APACHE", "Severity baseline", "red" if (stats.get("avg_apache_score") or 0) > 70 else "amber" if (stats.get("avg_apache_score") or 0) > 50 else "cyan"),
+        (f"{stats.get('avg_age') or 'â€”'}", "Avg Age", "May be unavailable in current backend stats", "cyan"),
         (f"{int(stats.get('total_on_vasopressor', 0)):,}", "On Vasopressor", "Field may be absent in current API", "amber"),
         (f"{int(stats.get('total_on_ventilator', 0)):,}", "On Ventilator", "Field may be absent in current API", "violet"),
     ]
-    cols = st.columns(6)
+    cols = st.columns(len(cards))
     for col, payload in zip(cols, cards):
         with col:
             st.markdown(metric_card(*payload), unsafe_allow_html=True)
@@ -71,11 +70,12 @@ def render_page() -> None:
     if patients_df.empty:
         st.info("No high-risk patients available from the current API.")
         return
-    display = patients_df[[c for c in ["patientunitstayid", "age", "gender", "unittype", "apachescore", "predicted_mortality_risk", "qsofa_score", "hospital_mortality"] if c in patients_df.columns]].copy()
+    display = patients_df[[c for c in ["patientunitstayid", "age", "gender", "unittype", "predicted_mortality_risk", "hospital_mortality"] if c in patients_df.columns]].copy()
     st.dataframe(display, use_container_width=True, hide_index=True)
     selected = st.number_input("Open patient from high-risk list", min_value=0, step=1, key="overview_patient_pick")
     if st.button("Go To Patient Detail", key="overview_go") and selected:
         st.session_state["selected_patient"] = int(selected)
-        st.session_state["page"] = "👤  Patient Detail"
+        st.session_state["page"] = "patient_detail"
         st.rerun()
+
 

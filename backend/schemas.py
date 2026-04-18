@@ -26,12 +26,3 @@ class PatientsResponse(BaseModel):
 
 class GenericListResponse(BaseModel):
     items: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class PredictionRequest(BaseModel):
-    patient_data: dict[str, Any] = Field(default_factory=dict)
-    threshold_type: str = "max_f1"
-
-
-class DeteriorationPredictionRequest(PredictionRequest):
-    window_id: int = Field(..., ge=0, le=5)

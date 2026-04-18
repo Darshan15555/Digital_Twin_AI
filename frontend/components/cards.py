@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from html import escape
 
@@ -22,12 +22,12 @@ def risk_badge(label: str) -> str:
 
 def vital_status_dot(value: float | int | None, low_crit: float, low_warn: float, high_warn: float, high_crit: float) -> str:
     if value is None:
-        return "⚪ Unknown"
+        return "âšª Unknown"
     if value <= low_crit or value >= high_crit:
-        return "🔴 Critical"
+        return "ðŸ”´ Critical"
     if value <= low_warn or value >= high_warn:
-        return "🟠 Warning"
-    return "🟢 Stable"
+        return "ðŸŸ  Warning"
+    return "ðŸŸ¢ Stable"
 
 
 def comorbidity_tags(comorbidities_dict: dict) -> str:
@@ -57,8 +57,7 @@ def patient_header_card(patient_dict: dict) -> str:
           <div><strong>Unit:</strong> {escape(str(patient_dict.get("unittype", "Unknown")))}</div>
         </div>
         <div>
-          <div><strong>APACHE:</strong> {escape(str(patient_dict.get("apachescore", "—")))}</div>
-          <div><strong>ICU LOS:</strong> {escape(str(patient_dict.get("icu_los_hours", "—")))}</div>
+          <div><strong>ICU LOS:</strong> {escape(str(patient_dict.get("icu_los_hours", "â€”")))}</div>
           <div><strong>Outcome:</strong> {escape("Expired" if patient_dict.get("hospital_mortality") == 1 else "Survived")}</div>
         </div>
       </div>
